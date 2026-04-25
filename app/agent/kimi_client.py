@@ -14,6 +14,10 @@ kimi = AsyncOpenAI(
     api_key=settings.kimi_api_key,
     base_url=settings.kimi_base_url,
     timeout=60.0,
+    default_headers={
+        "HTTP-Referer": "https://drufiy.vercel.app",
+        "X-Title": "Drufiy",
+    },
 )
 claude = (
     AsyncAnthropic(api_key=settings.anthropic_api_key)
