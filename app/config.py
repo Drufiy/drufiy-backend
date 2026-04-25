@@ -6,10 +6,12 @@ class Settings(BaseSettings):
     supabase_url: str
     supabase_service_key: str
 
-    # Kimi (OpenAI-compatible)
+    # Kimi / Moonshot (OpenAI-compatible)
+    # Direct Moonshot: KIMI_BASE_URL=https://api.moonshot.cn/v1  KIMI_MODEL=kimi-k2-5
+    # OpenRouter:      KIMI_BASE_URL=https://openrouter.ai/api/v1  KIMI_MODEL=moonshotai/kimi-k2.6
     kimi_api_key: str
-    kimi_base_url: str = "https://openrouter.ai/api/v1"
-    kimi_model: str = "moonshotai/kimi-k2.6"
+    kimi_base_url: str = "https://api.moonshot.cn/v1"
+    kimi_model: str = "kimi-k2-5"
 
     # Fallback model
     anthropic_api_key: str | None = None
