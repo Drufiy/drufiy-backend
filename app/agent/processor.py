@@ -1,9 +1,5 @@
-import base64
 import logging
-import re
 from datetime import datetime, timezone
-
-import httpx
 
 from app.agent.diagnosis_agent import diagnose_failure
 from app.agent.kimi_client import DiagnosisValidationError
@@ -20,111 +16,6 @@ from app.db import supabase
 
 logger = logging.getLogger(__name__)
 
-# ── File-fetch helpers ────────────────────────────────────────────────────────
-
-# Dependency manifest files — fetched conditionally based on log keywords
-_MANIFEST_CANDIDATES = [
-    ("package.json",       ["npm", "node", "yarn", "pnpm", "javascript", "typescript"]),
-    ("package-lock.json",  ["npm", "node"]),
-    ("requirements.txt",   ["python", "pip", "fastapi", "django", "flask"]),
-    ("pyproject.toml",     ["python", "pip", "poetry", "hatch", "uv"]),
-    ("setup.py",           ["python", "pip"]),
-    ("go.mod",             ["golang", "go build", "go test", "go run"]),
-    ("Cargo.toml",         ["rust", "cargo"]),
-    ("pom.xml",            ["maven", "java", "mvn"]),
-    ("build.gradle",       ["gradle", "java", "kotlin"]),
-    ("composer.json",      ["php", "composer"]),
-    ("Gemfile",            ["ruby", "bundler", "gem"]),
-]
-
-
-async def _fetch_relevant_files(
-    repo_full_name: str,
-    access_token: str,
-    logs: str,
-) -> dict[str, str]:
-    """
-    Fetch current file contents from GitHub that are relevant to the CI failure.
-
-    Always fetches: all .github/workflows/*.yml files
-    Conditionally fetches: dependency manifests whose keywords appear in the logs
-
-    Returns {path: content} dict — passed to diagnose_failure as current_files.
-    Non-critical: failures are logged but never propagate (returns {} on total failure).
-    """
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    base = f"https://api.github.com/repos/{repo_full_name}/contents"
-    logs_lower = logs.lower()
-    files: dict[str, str] = {}
-
-    async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
-
-        # ── 1. List + fetch all workflow YAML files ───────────────────────────
-        try:
-            resp = await client.get(f"{base}/.github/workflows")
-            if resp.status_code == 200:
-                entries = resp.json()
-                yml_paths = [
-                    e["path"] for e in entries
-                    if isinstance(e, dict) and e.get("type") == "file"
-                    and e.get("name", "").endswith((".yml", ".yaml"))
-                ]
-                for path in yml_paths[:5]:   # cap at 5 workflow files
-                    content = await _fetch_file_content(client, base, path)
-                    if content:
-                        files[path] = content
-            elif resp.status_code == 404:
-                logger.debug(f"No .github/workflows directory in {repo_full_name}")
-            else:
-                logger.warning(f"Workflow dir fetch returned {resp.status_code} for {repo_full_name}")
-        except Exception as e:
-            logger.warning(f"Failed to list workflow files for {repo_full_name}: {e}")
-
-        # ── 2. Conditionally fetch dependency manifests ───────────────────────
-        for manifest_path, keywords in _MANIFEST_CANDIDATES:
-            if any(kw in logs_lower for kw in keywords):
-                content = await _fetch_file_content(client, base, manifest_path)
-                if content:
-                    files[manifest_path] = content
-
-    if files:
-        logger.info(f"Fetched {len(files)} relevant files for diagnosis: {list(files.keys())}")
-    else:
-        logger.debug(f"No relevant files fetched for {repo_full_name}")
-
-    return files
-
-
-async def _fetch_file_content(
-    client: httpx.AsyncClient,
-    base_url: str,
-    path: str,
-) -> str | None:
-    """Fetch a single file from GitHub Contents API and decode its base64 content."""
-    try:
-        resp = await client.get(f"{base_url}/{path}")
-        if resp.status_code == 200:
-            data = resp.json()
-            raw = data.get("content", "")
-            # GitHub returns base64 with newlines
-            decoded = base64.b64decode(raw.replace("\n", "")).decode("utf-8", errors="replace")
-            # Cap at 20KB per file to avoid bloating the prompt
-            if len(decoded) > 20_000:
-                decoded = decoded[:20_000] + "\n# ... (truncated at 20KB)"
-            return decoded
-        elif resp.status_code == 404:
-            return None   # File doesn't exist — normal
-        else:
-            logger.debug(f"Fetch {path} → HTTP {resp.status_code}")
-            return None
-    except Exception as e:
-        logger.warning(f"Failed to fetch {path}: {e}")
-        return None
-
 
 # ── Public entry points ───────────────────────────────────────────────────────
 
@@ -134,11 +25,10 @@ async def process_failure(ci_run_id: str):
       1. Fetch ci_run + repo from Supabase
       2. Decrypt user's GitHub token
       3. Download workflow logs (ZIP → extract → truncate)
-      4. Fetch relevant file contents from GitHub (best-effort)
-      5. Kimi K2.6 diagnosis → Pydantic-validated Diagnosis
-      6. Store diagnosis in diagnoses table
-      7. If safe_auto_apply → diff-risk check → create fix PR
-      8. Update ci_run status throughout
+      4. Kimi K2.6 diagnosis → Pydantic-validated Diagnosis
+      5. Store diagnosis in diagnoses table
+      6. If safe_auto_apply → diff-risk check → create fix PR
+      7. Update ci_run status throughout
     """
     logger.info(f"process_failure start run_id={ci_run_id}")
     try:
@@ -181,10 +71,7 @@ async def process_failure(ci_run_id: str):
             await _mark_failed(ci_run_id, "diagnosis_failed", f"Log fetch failed: {e}")
             return
 
-        # ── 4. Fetch relevant file contents (best-effort) ────────────────────
-        current_files = await _fetch_relevant_files(repo_full_name, access_token, logs)
-
-        # ── 5. Diagnose ──────────────────────────────────────────────────────
+        # ── 4. Diagnose ──────────────────────────────────────────────────────
         try:
             diagnosis = await diagnose_failure(
                 logs=logs,
@@ -193,19 +80,18 @@ async def process_failure(ci_run_id: str):
                 workflow_name=workflow_name,
                 iteration=1,
                 run_id=ci_run_id,
-                current_files=current_files or None,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
             await _mark_failed(ci_run_id, "diagnosis_failed", str(e)[:300])
             return
 
-        # ── 6. Store diagnosis ───────────────────────────────────────────────
+        # ── 5. Store diagnosis ───────────────────────────────────────────────
         diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=1)
         _update_status(ci_run_id, "diagnosed")
         logger.info(f"Diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type} confidence={diagnosis.confidence}")
 
-        # ── 7. Auto-apply if safe ────────────────────────────────────────────
+        # ── 6. Auto-apply if safe ────────────────────────────────────────────
         if diagnosis.fix_type == "safe_auto_apply" and not diagnosis.is_flaky_test:
             logger.info(f"safe_auto_apply — creating fix PR for run {ci_run_id}")
             await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
@@ -239,11 +125,6 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             await _mark_failed(ci_run_id, "exhausted", "Iteration 2 had no logs to diagnose")
             return
 
-        access_token_iter2 = _get_access_token(repo["user_id"])
-        current_files: dict[str, str] = {}
-        if access_token_iter2:
-            current_files = await _fetch_relevant_files(repo_full_name, access_token_iter2, new_logs)
-
         try:
             diagnosis = await diagnose_failure(
                 logs=new_logs,
@@ -253,7 +134,6 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 iteration=2,
                 previous_diagnosis=previous_diagnosis,
                 run_id=ci_run_id,
-                current_files=current_files or None,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Iteration 2 diagnosis failed for run {ci_run_id}: {e}")
@@ -270,8 +150,9 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             and not diagnosis.is_flaky_test
             and diagnosis.confidence >= 0.9
         ):
-            if access_token_iter2:
-                await _apply_fix(ci_run_id, repo_full_name, access_token_iter2, repo["id"], diagnosis_row, diagnosis)
+            access_token = _get_access_token(repo["user_id"])
+            if access_token:
+                await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
 
     except Exception as e:
         logger.exception(f"process_iteration_2 crashed run_id={ci_run_id}: {e}")
