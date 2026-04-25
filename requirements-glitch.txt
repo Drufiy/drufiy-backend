@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+pydantic[email]
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+python-dotenv
+google-genai
+requests
+Werkzeug
+supabase
+sentence-transformers
+numpy
+openai

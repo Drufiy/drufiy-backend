@@ -1,0 +1,11 @@
+.env
+.env.local
+venv
+.venv
+__pycache__
+*.pyc
+*.pyo
+.DS_Store
+.pytest_cache
+tests/fixtures/
+*.log
