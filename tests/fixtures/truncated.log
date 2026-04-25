@@ -1,0 +1,23 @@
+... [earlier logs truncated] ...
+      ✓ returns 200 for valid token (45ms)
+      ✓ returns 200 for valid token (38ms)
+      ✓ returns 200 for valid token (41ms)
+      ✓ returns 200 for valid token (37ms)
+      ✓ returns 200 for valid token (44ms)
+      ✓ returns 200 for valid token (40ms)
+      ✓ returns 200 for valid token (39ms)
+      ✓ returns 200 for valid token (43ms)
+      ✓ returns 200 for valid token (46ms)
+      ✓ returns 200 for valid token (38ms)
+      ✓ returns 200 for valid token (42ms)
+      ✓ returns 200 for valid token (40ms)
+      ✗ validates request schema (3ms)
+
+        ● Auth API › POST /auth/login › validates request schema
+
+          expect(received).toBe(expected)
+
+          Expected: 422
+          Received: 500
+
+          at Object.<anonymous> (src/__tests__/auth.test.ts:

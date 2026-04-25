@@ -1,0 +1,56 @@
+
+=== 1_Set up job ===
+Current runner version: '2.317.0'
+Operating System: Ubuntu 22.04.4 LTS
+
+=== 2_actions_checkout@v4 ===
+Syncing repository: aradhya/test-app
+...done.
+
+=== 3_actions_setup-node@v4 ===
+Resolved: node@20.12.2
+node --version
+v20.12.2
+
+=== 4_Run npm ci ===
+added 487 packages in 22s
+
+=== 5_Run npm test ===
+
+> test-app@1.0.0 test
+> jest --ci --testTimeout=5000
+
+FAIL src/__tests__/integration/payments.test.ts (12.847s)
+  Payment Service Integration
+    ✓ creates a payment intent (234ms)
+    ✓ confirms a payment (891ms)
+    ✗ handles webhook from Stripe (5023ms)
+
+      ● Payment Service Integration › handles webhook from Stripe
+
+        Timeout - Async callback was not invoked within the 5000ms timeout specified by jest.setTimeout.
+
+        at /home/runner/work/test-app/node_modules/jest-jasmine2/build/queueRunner.js:47:12
+
+FAIL src/__tests__/integration/email.test.ts (8.332s)
+  Email Service
+    ✓ queues a welcome email (102ms)
+    ✗ sends via SendGrid API (8101ms)
+
+      ● Email Service › sends via SendGrid API
+
+        connect ETIMEDOUT 34.198.56.12:443
+
+        at TCPConnectWrap.afterConnect [as oncomplete] (net.js:1141:16)
+
+Test Suites: 2 failed, 5 passed, 7 total
+Tests:       2 failed, 31 passed, 33 total
+Time:        14.182s
+
+npm ERR! Lifecycle script `test` failed with error:
+npm ERR! Error: command failed: jest --ci --testTimeout=5000
+
+Error: Process completed with exit code 1.
+
+=== 6_Complete job ===
+Cleaning up orphan processes

@@ -1,22 +1,20 @@
 from contextlib import asynccontextmanager
 import asyncio
 import logging
-import json
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.logging_config import configure_logging
 from app.config import settings
 from app import db
 from app.db import supabase
 
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# Must be first — replaces basicConfig with JSON formatter for Cloud Run
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -96,6 +94,28 @@ app.add_middleware(
 )
 
 
+# ── Request logging middleware ────────────────────────────────────────────────
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    # Skip /health — too noisy (Cloud Run pings it every 10s)
+    if request.url.path == "/health":
+        return await call_next(request)
+    start = time.time()
+    response = await call_next(request)
+    duration_ms = int((time.time() - start) * 1000)
+    logger.info(
+        "request",
+        extra={
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": duration_ms,
+        },
+    )
+    return response
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.exception(f"Unhandled exception on {request.method} {request.url.path}")
@@ -111,12 +131,36 @@ def health():
     return {"status": "ok", "service": "drufiy-backend", "version": "0.1.0", "env": settings.env}
 
 
+# Cache Kimi check result for 60s — don't hammer the API on every health probe
+_kimi_health_cache: dict = {"ok": None, "checked_at": 0.0}
+
 @app.get("/health/deep")
 async def health_deep():
-    healthy = await db.healthcheck()
+    supabase_ok = await db.healthcheck()
+
+    # Check Kimi with 60s cache
+    now = time.time()
+    if now - _kimi_health_cache["checked_at"] > 60:
+        try:
+            from app.agent.kimi_client import kimi
+            await kimi.chat.completions.create(
+                model=settings.kimi_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+            _kimi_health_cache["ok"] = True
+        except Exception as e:
+            logger.warning(f"Kimi health check failed: {e}")
+            _kimi_health_cache["ok"] = False
+        _kimi_health_cache["checked_at"] = now
+
+    kimi_ok = _kimi_health_cache["ok"]
+    overall = "ok" if (supabase_ok and kimi_ok) else "degraded"
+
     return {
-        "status": "ok" if healthy else "degraded",
-        "supabase": "connected" if healthy else "disconnected",
+        "status": overall,
+        "supabase": "connected" if supabase_ok else "disconnected",
+        "kimi": "connected" if kimi_ok else "disconnected",
     }
 
 
