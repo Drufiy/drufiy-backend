@@ -78,14 +78,20 @@ async def handle_verification_event(payload: dict):
         logger.info(f"Verification event ignored — ci_run {ci_run_id} status={ci_run['status']}")
         return
 
-    # Append this workflow to the checked list
-    checked = ci_run.get("verification_checked_workflows") or []
-    checked.append({"workflow_id": workflow_id, "workflow_name": workflow_name, "conclusion": conclusion})
-
-    supabase.table("ci_runs").update({
-        "verification_checked_workflows": checked,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", ci_run_id).execute()
+    # Atomically append this workflow — avoids lost-update race conditions when
+    # multiple workflow_run events arrive concurrently for the same ci_run.
+    append_result = supabase.rpc(
+        "append_verification_workflow",
+        {
+            "p_run_id": ci_run_id,
+            "p_entry": {
+                "workflow_id": workflow_id,
+                "workflow_name": workflow_name,
+                "conclusion": conclusion,
+            },
+        },
+    ).execute()
+    checked = append_result.data or []
 
     # Count total workflows for this commit SHA via GitHub API
     try:

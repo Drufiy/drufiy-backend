@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
 import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app import db
+from app.db import supabase
 
 
 logging.basicConfig(
@@ -17,9 +20,67 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# ── Fix 2: recover ci_runs stuck in transient states after a server restart ───
+
+def _recover_stuck_runs():
+    """
+    Any run stuck in 'diagnosing' or 'applying' for > 5 minutes was almost
+    certainly abandoned when the server died mid-pipeline.  Reset them to
+    'pending' so the next webhook event (or a manual retry) can re-queue them.
+    """
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        stuck = (
+            supabase.table("ci_runs")
+            .select("id, status")
+            .in_("status", ["diagnosing", "applying"])
+            .lt("updated_at", cutoff)
+            .execute()
+        )
+        if stuck.data:
+            ids = [r["id"] for r in stuck.data]
+            supabase.table("ci_runs").update({
+                "status": "pending",
+                "error_message": "Auto-recovered after server restart (was stuck in-progress)",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).in_("id", ids).execute()
+            logger.info(f"Recovered {len(ids)} stuck run(s): {ids}")
+        else:
+            logger.info("No stuck runs found — clean startup")
+    except Exception as e:
+        logger.warning(f"Stuck-run recovery failed (non-fatal): {e}")
+
+
+# ── Fix 3: pre-warm Kimi so the first real diagnosis isn't slow ───────────────
+
+async def _prewarm_kimi():
+    """
+    Send a trivial 1-token completion to Kimi at startup.
+    This establishes the HTTP connection pool and warms any provider-side
+    caching, so the first real diagnosis doesn't pay a cold-start penalty.
+    """
+    try:
+        from app.agent.kimi_client import kimi
+        await kimi.chat.completions.create(
+            model=settings.kimi_model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+        logger.info("Kimi pre-warm complete ✓")
+    except Exception as e:
+        logger.warning(f"Kimi pre-warm failed (non-fatal): {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Drufiy backend starting")
+
+    # Fix 2: sync recovery (fast DB query, fine on startup path)
+    _recover_stuck_runs()
+
+    # Fix 3: async pre-warm — fire and forget, don't block startup
+    asyncio.create_task(_prewarm_kimi())
+
     yield
     logger.info("Drufiy backend shutting down")
 
