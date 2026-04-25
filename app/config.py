@@ -8,8 +8,8 @@ class Settings(BaseSettings):
 
     # Kimi (OpenAI-compatible)
     kimi_api_key: str
-    kimi_base_url: str = "https://api.moonshot.ai/v1"
-    kimi_model: str = "kimi-k2.6"
+    kimi_base_url: str = "https://openrouter.ai/api/v1"
+    kimi_model: str = "moonshotai/kimi-k2.6"
 
     # Fallback model
     anthropic_api_key: str | None = None

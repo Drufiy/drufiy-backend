@@ -55,9 +55,9 @@ async def assess_diff_risk(repo_id: str, file_path: str, proposed_content: str) 
 
     if changed_regions == 0:
         risk_level, reason = "low", "No changes vs known-good"
-    elif changed_regions == 1 and change_ratio < 0.1:
-        risk_level, reason = "low", "Single contiguous change, <10% of file"
-    elif changed_regions <= 2 and change_ratio < 0.25:
+    elif changed_regions == 1 and change_ratio < 0.5:
+        risk_level, reason = "low", f"Single contiguous change ({lines_added} lines added, {lines_removed} removed)"
+    elif changed_regions <= 3 and change_ratio < 0.25:
         risk_level, reason = "medium", f"{changed_regions} changed regions, {change_ratio:.0%} of file modified"
     else:
         risk_level, reason = (
