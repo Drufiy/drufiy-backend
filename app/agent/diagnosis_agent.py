@@ -356,9 +356,9 @@ async def diagnose_failure(
     Raises DiagnosisValidationError if the model cannot produce valid structured output.
     """
     # Truncate extremely long logs before preprocessing
-    if len(logs) > 100_000:
-        logger.warning(f"Logs exceed 100K chars ({len(logs)} chars), truncating for run {run_id}")
-        logs = "... [earlier logs truncated] ...\n" + logs[-80_000:]
+    if len(logs) > 50_000:
+        logger.warning(f"Logs exceed 50K chars ({len(logs)} chars), truncating for run {run_id}")
+        logs = "... [earlier logs truncated] ...\n" + logs[-40_000:]
 
     # Preprocess: strip noise, keep error-relevant lines
     preprocessed = _preprocess_logs(logs)
