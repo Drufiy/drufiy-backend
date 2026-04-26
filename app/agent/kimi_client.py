@@ -12,22 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 # ── Client setup ─────────────────────────────────────────────────────────────
-# OpenRouter requires HTTP-Referer + X-Title headers.
-# Direct Moonshot API (api.moonshot.ai) does not.
-# We detect which provider by URL so switching is a one-line .env change.
-
-_openrouter_headers = {}
-if "openrouter.ai" in settings.kimi_base_url:
-    _openrouter_headers = {
-        "HTTP-Referer": "https://drufiy.vercel.app",
-        "X-Title": "Drufiy",
-    }
 
 kimi = AsyncOpenAI(
     api_key=settings.kimi_api_key,
     base_url=settings.kimi_base_url,
-    timeout=120.0,                    # Kimi K2.6 can be slow on long logs
-    default_headers=_openrouter_headers,
+    timeout=120.0,                    # Moonshot can be slow on long logs
 )
 
 claude = (
@@ -77,7 +66,6 @@ async def _call_kimi(messages: list, tool_schema: dict):
     """
     Returns (parsed_args_or_none, raw_content, usage_info).
     Handles 402 (credit exhausted) gracefully — returns None so Claude fallback fires.
-    kimi-k2.6 only accepts temperature=1 and tool_choice="required".
     """
     start = time.time()
     try:
@@ -85,9 +73,9 @@ async def _call_kimi(messages: list, tool_schema: dict):
             model=settings.kimi_model,
             messages=messages,
             tools=[{"type": "function", "function": tool_schema}],
-            tool_choice="required",  # kimi-k2.6 thinking mode requires this
-            temperature=1,           # kimi-k2.6 only accepts temperature=1
-            max_tokens=3000,         # OpenRouter credit limit is 3320 tokens
+            tool_choice="required",  # Moonshot requires this for tool calls
+            temperature=0.1,
+            max_tokens=8000,
         )
     except Exception as e:
         # 402 insufficient credits, 429 rate limit, 503 provider down — all recoverable
@@ -142,7 +130,7 @@ async def _call_claude_fallback(messages: list, tool_schema: dict):
     try:
         response = await claude.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=3000,
+            max_tokens=8000,
             system=system,
             messages=user_messages,
             tools=[anthropic_tool],
