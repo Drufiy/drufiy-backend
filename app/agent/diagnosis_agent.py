@@ -380,7 +380,6 @@ async def diagnose_failure(
         tool_schema=DIAGNOSIS_TOOL,
         run_id=run_id,
         call_type=call_type,
-        temperature=0.1,
     )
 
     try:

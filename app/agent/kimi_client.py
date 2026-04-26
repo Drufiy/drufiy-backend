@@ -73,10 +73,11 @@ def _extract_json_from_prose(text: str) -> dict | None:
     return None
 
 
-async def _call_kimi(messages: list, tool_schema: dict, temperature: float):
+async def _call_kimi(messages: list, tool_schema: dict):
     """
     Returns (parsed_args_or_none, raw_content, usage_info).
     Handles 402 (credit exhausted) gracefully — returns None so Claude fallback fires.
+    kimi-k2.6 only accepts temperature=1 and tool_choice="required".
     """
     start = time.time()
     try:
@@ -84,8 +85,8 @@ async def _call_kimi(messages: list, tool_schema: dict, temperature: float):
             model=settings.kimi_model,
             messages=messages,
             tools=[{"type": "function", "function": tool_schema}],
-            tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
-            temperature=temperature,
+            tool_choice="required",  # kimi-k2.6 thinking mode requires this
+            temperature=1,           # kimi-k2.6 only accepts temperature=1
             max_tokens=8000,
         )
     except Exception as e:
@@ -150,7 +151,6 @@ async def _call_claude_fallback(messages: list, tool_schema: dict):
     except Exception as e:
         logger.error(f"Claude fallback also failed: {e}")
         return None, "", {}
-
     latency_ms = int((time.time() - start) * 1000)
     usage = {
         "input_tokens": response.usage.input_tokens,
@@ -191,25 +191,25 @@ async def call_with_tool(
     tool_schema: dict,
     run_id: str | None = None,
     call_type: str = "diagnosis",
-    temperature: float = 0.1,
+    temperature: float = 1.0,  # kimi-k2.6 only accepts temperature=1; param kept for API compat
 ) -> dict:
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
 
-    # Attempt 1: normal temperature
-    args, raw, usage = await _call_kimi(messages, tool_schema, temperature)
+    # Attempt 1
+    args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
                     valid=(args is not None), error="No tool call in response" if args is None else None)
     if args is not None:
         return args
-    logger.warning("Kimi attempt 1: no valid tool call — retrying at temperature=0")
+    logger.warning("Kimi attempt 1: no valid tool call — retrying")
 
-    # Attempt 2: temperature=0 (deterministic)
-    args, raw, usage = await _call_kimi(messages, tool_schema, 0.0)
+    # Attempt 2
+    args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
-                    valid=(args is not None), error="No tool call after temp=0 retry" if args is None else None)
+                    valid=(args is not None), error="No tool call after retry" if args is None else None)
     if args is not None:
         return args
     logger.warning("Kimi attempt 2: still no valid tool call — activating Claude fallback")
