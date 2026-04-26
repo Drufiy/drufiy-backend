@@ -87,7 +87,7 @@ async def _call_kimi(messages: list, tool_schema: dict):
             tools=[{"type": "function", "function": tool_schema}],
             tool_choice="required",  # kimi-k2.6 thinking mode requires this
             temperature=1,           # kimi-k2.6 only accepts temperature=1
-            max_tokens=4000,         # Kimi K2.6 actual output limit (8000 causes truncation)
+            max_tokens=3000,         # OpenRouter credit limit is 3320 tokens
         )
     except Exception as e:
         # 402 insufficient credits, 429 rate limit, 503 provider down — all recoverable
@@ -142,7 +142,7 @@ async def _call_claude_fallback(messages: list, tool_schema: dict):
     try:
         response = await claude.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4000,
+            max_tokens=3000,
             system=system,
             messages=user_messages,
             tools=[anthropic_tool],
