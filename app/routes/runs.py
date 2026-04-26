@@ -208,31 +208,19 @@ def history(
     offset: int = 0,
     current_user: dict = Depends(get_current_user),
 ):
-    repos = (
-        supabase.table("connected_repos")
-        .select("id")
-        .eq("user_id", current_user["id"])
-        .execute()
-        .data
-    )
-    if not repos:
-        return []
-
-    repo_ids = [r["id"] for r in repos]
     runs = (
         supabase.table("ci_runs")
-        .select("id, repo_id, branch, commit_sha, commit_message, status, fix_branch_name, created_at, updated_at")
-        .in_("repo_id", repo_ids)
+        .select("*, connected_repos(repo_full_name)")
+        .eq("connected_repos.user_id", current_user["id"])
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()
         .data
     )
-
-    run_ids = [r["id"] for r in runs]
-    if not run_ids:
+    if not runs:
         return []
 
+    run_ids = [r["id"] for r in runs]
     diags = (
         supabase.table("diagnoses")
         .select("run_id, iteration, problem_summary, fix_type, confidence, category, github_pr_url, github_pr_number, verification_status, created_at")
