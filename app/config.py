@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     # Kimi (OpenAI-compatible)
     kimi_api_key: str
     kimi_base_url: str = "https://api.moonshot.cn/v1"
-    kimi_model: str = "moonshot-v1-128k"
+    kimi_model: str = "kimi-k2.6"  # Moonshot's latest model
 
     # Fallback model
     anthropic_api_key: str | None = None
