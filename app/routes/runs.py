@@ -51,6 +51,105 @@ def _get_latest_diagnosis(run_id: str) -> Optional[dict]:
     return result.data[0] if result.data else None
 
 
+# ── GET /runs/history ─────────────────────────────────────────────────────────
+
+@router.get("/history")
+def history(
+    limit: int = 50,
+    offset: int = 0,
+    current_user: dict = Depends(get_current_user),
+):
+    repos = (
+        supabase.table("connected_repos")
+        .select("id")
+        .eq("user_id", current_user["id"])
+        .execute()
+        .data
+    )
+    if not repos:
+        return []
+
+    repo_ids = [r["id"] for r in repos]
+    runs = (
+        supabase.table("ci_runs")
+        .select("id, repo_id, branch, commit_sha, commit_message, status, fix_branch_name, created_at, updated_at")
+        .in_("repo_id", repo_ids)
+        .order("created_at", desc=True)
+        .range(offset, offset + limit - 1)
+        .execute()
+        .data
+    )
+
+    run_ids = [r["id"] for r in runs]
+    if not run_ids:
+        return []
+
+    diags = (
+        supabase.table("diagnoses")
+        .select("run_id, iteration, problem_summary, fix_type, confidence, category, github_pr_url, github_pr_number, verification_status, created_at")
+        .in_("run_id", run_ids)
+        .order("iteration", desc=True)
+        .execute()
+        .data
+    )
+
+    diag_map = {}
+    for d in diags:
+        if d["run_id"] not in diag_map:
+            diag_map[d["run_id"]] = d
+
+    return [{**r, "diagnosis": diag_map.get(r["id"])} for r in runs]
+
+
+# ── GET /runs/dashboard/stats ─────────────────────────────────────────────────
+
+@router.get("/dashboard/stats")
+async def dashboard_stats(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+
+    async def _repos_count():
+        r = supabase.table("connected_repos").select("id", count="exact").eq("user_id", user_id).eq("is_active", True).execute()
+        return r.count or 0
+
+    async def _diagnosed_count():
+        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
+        if not repos:
+            return 0
+        ids = [r["id"] for r in repos]
+        r = supabase.table("ci_runs").select("id", count="exact").in_("repo_id", ids).not_.is_("status", "null").execute()
+        return r.count or 0
+
+    async def _prs_count():
+        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
+        if not repos:
+            return 0
+        ids = [r["id"] for r in repos]
+        runs = supabase.table("ci_runs").select("id").in_("repo_id", ids).not_.is_("fix_branch_name", "null").execute().data
+        if not runs:
+            return 0
+        run_ids = [r["id"] for r in runs]
+        r = supabase.table("diagnoses").select("id", count="exact").in_("run_id", run_ids).not_.is_("github_pr_number", "null").execute()
+        return r.count or 0
+
+    async def _verified_count():
+        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
+        if not repos:
+            return 0
+        ids = [r["id"] for r in repos]
+        r = supabase.table("ci_runs").select("id", count="exact").in_("repo_id", ids).eq("status", "verified").execute()
+        return r.count or 0
+
+    repos, diagnosed, prs, verified = await asyncio.gather(
+        _repos_count(), _diagnosed_count(), _prs_count(), _verified_count()
+    )
+    return {
+        "repos_connected": repos,
+        "failures_diagnosed": diagnosed,
+        "prs_created": prs,
+        "verified_fixes": verified,
+    }
+
+
 # ── GET /runs/{run_id} ────────────────────────────────────────────────────────
 
 @router.get("/{run_id}")
@@ -198,119 +297,3 @@ async def dry_run(run_id: str, current_user: dict = Depends(get_current_user)):
     overall = "safe_to_apply" if (all_low and diagnosis["fix_type"] == "safe_auto_apply") else "review_before_applying"
 
     return {"run_id": run_id, "diff_preview": diff_preview, "overall_recommendation": overall}
-
-
-# ── GET /runs/history ─────────────────────────────────────────────────────────
-
-@router.get("/history")
-def history(
-    limit: int = 50,
-    offset: int = 0,
-    current_user: dict = Depends(get_current_user),
-):
-    repos = (
-        supabase.table("connected_repos")
-        .select("id")
-        .eq("user_id", current_user["id"])
-        .execute()
-        .data
-    )
-    if not repos:
-        return []
-
-    repo_ids = [r["id"] for r in repos]
-
-    # Build a repo_id → repo_full_name lookup so we can attach it to each run
-    repo_lookup = {
-        r["id"]: r["repo_full_name"]
-        for r in supabase.table("connected_repos")
-        .select("id, repo_full_name")
-        .in_("id", repo_ids)
-        .execute()
-        .data
-    }
-
-    runs = (
-        supabase.table("ci_runs")
-        .select("id, repo_id, branch, commit_sha, commit_message, github_workflow_name, status, fix_branch_name, created_at, updated_at")
-        .in_("repo_id", repo_ids)
-        .order("created_at", desc=True)
-        .range(offset, offset + limit - 1)
-        .execute()
-        .data
-    )
-    if not runs:
-        return []
-
-    run_ids = [r["id"] for r in runs]
-    diags = (
-        supabase.table("diagnoses")
-        .select("run_id, iteration, problem_summary, fix_type, confidence, category, github_pr_url, github_pr_number, verification_status, created_at")
-        .in_("run_id", run_ids)
-        .order("iteration", desc=True)
-        .execute()
-        .data
-    )
-
-    diag_map = {}
-    for d in diags:
-        if d["run_id"] not in diag_map:
-            diag_map[d["run_id"]] = d
-
-    return [
-        {
-            **r,
-            "repo_full_name": repo_lookup.get(r["repo_id"], ""),
-            "diagnosis": diag_map.get(r["id"]),
-        }
-        for r in runs
-    ]
-
-
-# ── GET /runs/dashboard/stats ─────────────────────────────────────────────────
-
-@router.get("/dashboard/stats")
-async def dashboard_stats(current_user: dict = Depends(get_current_user)):
-    user_id = current_user["id"]
-
-    async def _repos_count():
-        r = supabase.table("connected_repos").select("id", count="exact").eq("user_id", user_id).eq("is_active", True).execute()
-        return r.count or 0
-
-    async def _diagnosed_count():
-        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
-        if not repos:
-            return 0
-        ids = [r["id"] for r in repos]
-        r = supabase.table("ci_runs").select("id", count="exact").in_("repo_id", ids).not_.is_("status", "null").execute()
-        return r.count or 0
-
-    async def _prs_count():
-        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
-        if not repos:
-            return 0
-        ids = [r["id"] for r in repos]
-        runs = supabase.table("ci_runs").select("id").in_("repo_id", ids).not_.is_("fix_branch_name", "null").execute().data
-        if not runs:
-            return 0
-        run_ids = [r["id"] for r in runs]
-        r = supabase.table("diagnoses").select("id", count="exact").in_("run_id", run_ids).not_.is_("github_pr_number", "null").execute()
-        return r.count or 0
-
-    async def _verified_count():
-        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
-        if not repos:
-            return 0
-        ids = [r["id"] for r in repos]
-        r = supabase.table("ci_runs").select("id", count="exact").in_("repo_id", ids).eq("status", "verified").execute()
-        return r.count or 0
-
-    repos, diagnosed, prs, verified = await asyncio.gather(
-        _repos_count(), _diagnosed_count(), _prs_count(), _verified_count()
-    )
-    return {
-        "repos_connected": repos,
-        "failures_diagnosed": diagnosed,
-        "prs_created": prs,
-        "verified_fixes": verified,
-    }
