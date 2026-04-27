@@ -74,7 +74,9 @@ async def handle_verification_event(payload: dict):
     ci_run_id = ci_run["id"]
     repo = ci_run["connected_repos"]
 
-    if ci_run["status"] not in ("fixed", "waiting_verification"):
+    # Also allow "applying" — race condition where fix branch CI completes
+    # before the backend finishes updating status from applying → fixed
+    if ci_run["status"] not in ("fixed", "waiting_verification", "applying"):
         logger.info(f"Verification event ignored — ci_run {ci_run_id} status={ci_run['status']}")
         return
 
