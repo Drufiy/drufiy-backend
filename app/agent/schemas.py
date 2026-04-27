@@ -41,6 +41,9 @@ class Diagnosis(BaseModel):
         fix_type = info.data.get("fix_type")
         if fix_type == "manual_required" and len(v) > 0:
             raise ValueError("manual_required diagnoses must have empty files_changed")
-        if fix_type in ("safe_auto_apply", "review_recommended") and len(v) == 0:
-            raise ValueError(f"{fix_type} must have at least one file change")
+        # NOTE: review_recommended with no files is handled as a business-rule downgrade
+        # to manual_required in diagnose_failure() — do NOT raise here, or the whole
+        # diagnosis is rejected and the run fails instead of gracefully degrading.
+        if fix_type == "safe_auto_apply" and len(v) == 0:
+            raise ValueError("safe_auto_apply must have at least one file change")
         return v
