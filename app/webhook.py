@@ -95,7 +95,9 @@ async def handle_verification_event(payload: dict):
     ).execute()
     checked = append_result.data or []
 
-    # Count total workflows for this commit SHA via GitHub API
+    # Count total workflows on the fix branch via GitHub API
+    # NOTE: query by branch only — the fix branch has a different commit SHA
+    # than the original failing commit, so filtering by head_sha returns 0 results.
     try:
         token_result = supabase.rpc(
             "get_decrypted_token",
@@ -111,18 +113,23 @@ async def handle_verification_event(payload: dict):
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
-                params={"head_sha": commit_sha, "branch": branch},
+                params={"branch": branch, "per_page": 10},
             )
         if resp.status_code != 200:
-            logger.warning(f"Could not fetch workflow runs for SHA {commit_sha}: {resp.status_code}")
+            logger.warning(f"Could not fetch workflow runs for branch {branch}: {resp.status_code}")
             return
 
         all_runs = resp.json().get("workflow_runs", [])
-        total_expected = len(all_runs)
-        all_concluded = all(r.get("status") == "completed" for r in all_runs)
+        # Only count completed runs — ignore in_progress/queued
+        completed_runs = [r for r in all_runs if r.get("status") == "completed"]
+        total_expected = len(completed_runs)
 
-        if not all_concluded or len(checked) < total_expected:
-            logger.info(f"Verification pending — {len(checked)}/{total_expected} workflows done for run {ci_run_id}")
+        if total_expected == 0:
+            logger.info(f"Verification pending — no completed runs on {branch} yet")
+            return
+
+        if len(checked) < total_expected:
+            logger.info(f"Verification pending — {len(checked)}/{total_expected} workflows collected for run {ci_run_id}")
             return
 
         if all(w["conclusion"] == "success" for w in checked):
