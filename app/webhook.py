@@ -113,13 +113,17 @@ async def handle_verification_event(payload: dict):
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
                 },
-                params={"branch": branch, "per_page": 10},
+                # NOTE: GitHub's `branch` filter silently returns 0 for pull_request-triggered
+                # runs. Fetch broadly and filter client-side by head_branch instead.
+                params={"per_page": 50},
             )
         if resp.status_code != 200:
             logger.warning(f"Could not fetch workflow runs for branch {branch}: {resp.status_code}")
             return
 
-        all_runs = resp.json().get("workflow_runs", [])
+        all_runs_raw = resp.json().get("workflow_runs", [])
+        # Filter client-side by head_branch — works for both push and pull_request events
+        all_runs = [r for r in all_runs_raw if r.get("head_branch") == branch]
         # Only count completed runs — ignore in_progress/queued
         completed_runs = [r for r in all_runs if r.get("status") == "completed"]
         total_expected = len(completed_runs)
