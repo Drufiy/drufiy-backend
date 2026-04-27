@@ -1,3 +1,4 @@
+import base64
 import logging
 from typing import Optional
 
@@ -187,6 +188,16 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
     except Exception as e:
         logger.warning(f"Failed to seed known_good_files for {body.repo_full_name}: {e}")
 
+    # Auto-install minimal CI workflow if none exists (best-effort)
+    try:
+        await _auto_install_workflow(
+            repo_full_name=body.repo_full_name,
+            default_branch=actual_default_branch,
+            token=token,
+        )
+    except Exception as e:
+        logger.warning(f"Failed to auto-install workflow for {body.repo_full_name}: {e}")
+
     return repo_row
 
 
@@ -201,7 +212,6 @@ async def _seed_known_good_files(repo_id: str, repo_full_name: str, default_bran
         if resp.status_code != 200:
             return
 
-        import base64
         for item in resp.json():
             if not item["name"].endswith((".yml", ".yaml")):
                 continue
@@ -219,6 +229,103 @@ async def _seed_known_good_files(repo_id: str, repo_full_name: str, default_bran
                 },
                 on_conflict="repo_id,file_path",
             ).execute()
+
+
+_WORKFLOW_TEMPLATES: dict[str, str] = {
+    "python": """\
+name: drufiy-ci
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - run: pip install flake8
+      - run: python -m py_compile $(git ls-files '*.py') || true
+      - run: flake8 --select=E9,F821,F823 --show-source .
+""",
+    "typescript": """\
+name: drufiy-ci
+on: [push, pull_request]
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit --skipLibCheck
+""",
+    "javascript": """\
+name: drufiy-ci
+on: [push, pull_request]
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "lts/*"
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit --skipLibCheck
+""",
+    "_default": """\
+name: drufiy-ci
+on: [push, pull_request]
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "drufiy-ci ok"
+""",
+}
+
+
+async def _auto_install_workflow(repo_full_name: str, default_branch: str, token: str) -> None:
+    headers = _gh_headers(token)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        # Check whether any workflows already exist
+        check_resp = await client.get(
+            f"{GITHUB_API}/repos/{repo_full_name}/contents/.github/workflows",
+            headers=headers,
+            params={"ref": default_branch},
+        )
+        if check_resp.status_code != 404:
+            # Workflows directory exists (or unexpected error) — skip silently
+            return
+
+        # Detect primary language
+        repo_resp = await client.get(f"{GITHUB_API}/repos/{repo_full_name}", headers=headers)
+        repo_resp.raise_for_status()
+        language = (repo_resp.json().get("language") or "").lower()
+
+        template = _WORKFLOW_TEMPLATES.get(language, _WORKFLOW_TEMPLATES["_default"])
+        encoded = base64.b64encode(template.encode()).decode()
+
+        put_resp = await client.put(
+            f"{GITHUB_API}/repos/{repo_full_name}/contents/.github/workflows/drufiy-ci.yml",
+            headers=headers,
+            json={
+                "message": "ci: add minimal drufiy-ci workflow",
+                "content": encoded,
+                "branch": default_branch,
+            },
+        )
+        if put_resp.status_code in (200, 201):
+            logger.info(f"Auto-installed drufiy-ci.yml for {repo_full_name} (language={language or 'unknown'})")
+        else:
+            logger.warning(
+                f"Could not create drufiy-ci.yml for {repo_full_name}: "
+                f"HTTP {put_resp.status_code} — {put_resp.text[:200]}"
+            )
 
 
 # ── Disconnect a repo ────────────────────────────────────────────────────────

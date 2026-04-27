@@ -1,5 +1,9 @@
+import base64
 import logging
+import re
 from datetime import datetime, timezone
+
+import httpx
 
 from app.agent.diagnosis_agent import diagnose_failure
 from app.agent.kimi_client import DiagnosisValidationError
@@ -71,7 +75,15 @@ async def process_failure(ci_run_id: str):
             await _mark_failed(ci_run_id, "diagnosis_failed", f"Log fetch failed: {e}")
             return
 
-        # ── 4. Diagnose ──────────────────────────────────────────────────────
+        # ── 4. Fetch source files for diagnosis context ──────────────────────
+        current_files = await _fetch_relevant_files(
+            logs=logs,
+            repo_full_name=repo_full_name,
+            access_token=access_token,
+            default_branch=repo.get("default_branch", "main"),
+        )
+
+        # ── 5. Diagnose ──────────────────────────────────────────────────────
         try:
             diagnosis = await diagnose_failure(
                 logs=logs,
@@ -80,18 +92,19 @@ async def process_failure(ci_run_id: str):
                 workflow_name=workflow_name,
                 iteration=1,
                 run_id=ci_run_id,
+                current_files=current_files or None,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
             await _mark_failed(ci_run_id, "diagnosis_failed", str(e)[:300])
             return
 
-        # ── 5. Store diagnosis ───────────────────────────────────────────────
+        # ── 6. Store diagnosis ───────────────────────────────────────────────
         diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=1)
         _update_status(ci_run_id, "diagnosed")
         logger.info(f"Diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type} confidence={diagnosis.confidence}")
 
-        # ── 6. Auto-apply if safe ────────────────────────────────────────────
+        # ── 7. Auto-apply if safe ────────────────────────────────────────────
         if diagnosis.fix_type == "safe_auto_apply" and not diagnosis.is_flaky_test:
             logger.info(f"safe_auto_apply — creating fix PR for run {ci_run_id}")
             await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
@@ -125,6 +138,16 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             await _mark_failed(ci_run_id, "exhausted", "Iteration 2 had no logs to diagnose")
             return
 
+        access_token_iter2 = _get_access_token(repo["user_id"])
+        current_files_iter2 = {}
+        if access_token_iter2:
+            current_files_iter2 = await _fetch_relevant_files(
+                logs=new_logs,
+                repo_full_name=repo_full_name,
+                access_token=access_token_iter2,
+                default_branch=repo.get("default_branch", "main"),
+            )
+
         try:
             diagnosis = await diagnose_failure(
                 logs=new_logs,
@@ -134,6 +157,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 iteration=2,
                 previous_diagnosis=previous_diagnosis,
                 run_id=ci_run_id,
+                current_files=current_files_iter2 or None,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Iteration 2 diagnosis failed for run {ci_run_id}: {e}")
@@ -157,6 +181,101 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
     except Exception as e:
         logger.exception(f"process_iteration_2 crashed run_id={ci_run_id}: {e}")
         await _mark_failed(ci_run_id, "exhausted", f"Unexpected error: {str(e)[:200]}")
+
+
+# ── Source file fetcher ───────────────────────────────────────────────────────
+
+# File extensions worth fetching as context
+_SOURCE_EXTENSIONS = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
+    ".java", ".rb", ".php", ".cs", ".cpp", ".c", ".h",
+    ".json", ".toml", ".yaml", ".yml",
+}
+
+# Patterns to extract file paths from CI logs
+_FILE_PATH_RE = re.compile(
+    r"""
+    (?:
+        File\s+"?([^"'\s,]+\.[a-zA-Z]+)"?    |   # Python: File "path.py"
+        (?:ERROR|error)\s+(?:in\s+)?([^\s:]+\.[a-zA-Z]+)  |   # Generic: error in path.ext
+        \s+at\s+[^(]+\(([^)]+\.[a-zA-Z]+):\d+\)  |  # JS stack frame: at fn (file.ts:10)
+        ([a-zA-Z0-9_./\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb))\b  # bare path with known extension
+    )
+    """,
+    re.VERBOSE,
+)
+
+# Common dependency manifests — always fetch these if they exist
+_MANIFEST_FILES = [
+    "package.json", "requirements.txt", "pyproject.toml",
+    "Cargo.toml", "go.mod", "pom.xml", "Gemfile",
+]
+
+
+async def _fetch_relevant_files(
+    logs: str,
+    repo_full_name: str,
+    access_token: str,
+    default_branch: str,
+    max_files: int = 6,
+    max_file_bytes: int = 20_000,
+) -> dict[str, str]:
+    """
+    Extract file paths from CI logs, fetch them from GitHub, return {path: content}.
+    Also fetches dependency manifests for context. Best-effort — never raises.
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    # Extract candidate paths from logs
+    candidates: list[str] = []
+    for match in _FILE_PATH_RE.finditer(logs):
+        path = next((g for g in match.groups() if g), None)
+        if not path:
+            continue
+        # Normalise: strip leading ./ and leading /
+        path = path.lstrip("./")
+        # Filter out noise (node_modules, __pycache__, absolute system paths, urls)
+        if any(skip in path for skip in ("node_modules", "__pycache__", "/usr/", "/home/runner", "http")):
+            continue
+        ext = "." + path.rsplit(".", 1)[-1] if "." in path else ""
+        if ext in _SOURCE_EXTENSIONS and path not in candidates:
+            candidates.append(path)
+
+    # Prepend manifests so they're always included if slots remain
+    paths_to_fetch = _MANIFEST_FILES + [p for p in candidates if p not in _MANIFEST_FILES]
+    paths_to_fetch = paths_to_fetch[:max_files]
+
+    result: dict[str, str] = {}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for path in paths_to_fetch:
+                try:
+                    resp = await client.get(
+                        f"https://api.github.com/repos/{repo_full_name}/contents/{path}",
+                        headers=headers,
+                        params={"ref": default_branch},
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    if data.get("type") != "file" or not data.get("content"):
+                        continue
+                    content = base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
+                    if len(content) > max_file_bytes:
+                        content = content[:max_file_bytes] + f"\n... [truncated at {max_file_bytes} chars] ..."
+                    result[path] = content
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"Failed to fetch source files for {repo_full_name}: {e}")
+
+    if result:
+        logger.info(f"Fetched {len(result)} source files for {repo_full_name}: {list(result.keys())}")
+    return result
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
