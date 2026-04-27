@@ -69,15 +69,32 @@ async def _prewarm_kimi():
         logger.warning(f"Kimi pre-warm failed (non-fatal): {e}")
 
 
+async def _reconciler_loop():
+    """
+    Background loop: sweep ci_runs stuck in 'fixed' every 60s.
+    Resolves spinners that got stuck because webhook events arrived during deploys.
+    """
+    from app.agent.reconciler import reconcile_stuck_verifications
+    while True:
+        try:
+            await reconcile_stuck_verifications()
+        except Exception as e:
+            logger.warning(f"Reconciler loop error (non-fatal): {e}")
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Drufiy backend starting")
 
-    # Fix 2: sync recovery (fast DB query, fine on startup path)
+    # Sync recovery of runs stuck mid-pipeline after restart
     _recover_stuck_runs()
 
-    # Fix 3: async pre-warm — fire and forget, don't block startup
+    # Async pre-warm Kimi connection pool
     asyncio.create_task(_prewarm_kimi())
+
+    # Verification reconciler — auto-resolves spinners every 60s
+    asyncio.create_task(_reconciler_loop())
 
     yield
     logger.info("Drufiy backend shutting down")
