@@ -15,21 +15,27 @@ router = APIRouter()
 
 class OAuthCallbackRequest(BaseModel):
     code: str
+    redirect_uri: str | None = None  # frontend passes its own origin so exchange matches
 
 
 # ── GitHub OAuth callback ────────────────────────────────────────────────────
 
 @router.post("/github/callback")
 async def github_callback(body: OAuthCallbackRequest):
+    exchange_payload: dict = {
+        "client_id": settings.github_client_id,
+        "client_secret": settings.github_client_secret,
+        "code": body.code,
+    }
+    # Including redirect_uri in the exchange prevents GitHub edge-case mismatches
+    if body.redirect_uri:
+        exchange_payload["redirect_uri"] = body.redirect_uri
+
     async with httpx.AsyncClient(timeout=10.0) as client:
         # Exchange code for access token
         token_resp = await client.post(
             "https://github.com/login/oauth/access_token",
-            json={
-                "client_id": settings.github_client_id,
-                "client_secret": settings.github_client_secret,
-                "code": body.code,
-            },
+            json=exchange_payload,
             headers={"Accept": "application/json"},
         )
 
