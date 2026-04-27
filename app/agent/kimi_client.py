@@ -66,6 +66,9 @@ async def _call_kimi(messages: list, tool_schema: dict):
     """
     Returns (parsed_args_or_none, raw_content, usage_info).
     Handles 402 (credit exhausted) gracefully — returns None so Claude fallback fires.
+
+    Note: kimi-k2.6 with thinking disabled requires exactly temperature=0.6.
+    Extended thinking is disabled because it is incompatible with forced tool_choice.
     """
     start = time.time()
     try:
@@ -73,9 +76,10 @@ async def _call_kimi(messages: list, tool_schema: dict):
             model=settings.kimi_model,
             messages=messages,
             tools=[{"type": "function", "function": tool_schema}],
-            tool_choice="required",  # Moonshot requires this for tool calls
-            temperature=0.1,
+            tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
+            temperature=0.6,   # required when thinking is disabled on kimi-k2.6
             max_tokens=8000,
+            extra_body={"thinking": {"type": "disabled"}},  # disable CoT thinking — incompatible with forced tool_choice
         )
     except Exception as e:
         # 402 insufficient credits, 429 rate limit, 503 provider down — all recoverable
@@ -179,7 +183,7 @@ async def call_with_tool(
     tool_schema: dict,
     run_id: str | None = None,
     call_type: str = "diagnosis",
-    temperature: float = 1.0,  # kimi-k2.6 only accepts temperature=1; param kept for API compat
+    temperature: float = 0.6,   # 0.6 required when thinking disabled on kimi-k2.6
 ) -> dict:
     messages = [
         {"role": "system", "content": system_prompt},
@@ -194,7 +198,7 @@ async def call_with_tool(
         return args
     logger.warning("Kimi attempt 1: no valid tool call — retrying")
 
-    # Attempt 2
+    # Attempt 2: retry with same params (model is non-deterministic enough to differ)
     args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
                     valid=(args is not None), error="No tool call after retry" if args is None else None)

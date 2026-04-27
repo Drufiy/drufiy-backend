@@ -208,10 +208,32 @@ def history(
     offset: int = 0,
     current_user: dict = Depends(get_current_user),
 ):
+    repos = (
+        supabase.table("connected_repos")
+        .select("id")
+        .eq("user_id", current_user["id"])
+        .execute()
+        .data
+    )
+    if not repos:
+        return []
+
+    repo_ids = [r["id"] for r in repos]
+
+    # Build a repo_id → repo_full_name lookup so we can attach it to each run
+    repo_lookup = {
+        r["id"]: r["repo_full_name"]
+        for r in supabase.table("connected_repos")
+        .select("id, repo_full_name")
+        .in_("id", repo_ids)
+        .execute()
+        .data
+    }
+
     runs = (
         supabase.table("ci_runs")
-        .select("*, connected_repos(repo_full_name)")
-        .eq("connected_repos.user_id", current_user["id"])
+        .select("id, repo_id, branch, commit_sha, commit_message, github_workflow_name, status, fix_branch_name, created_at, updated_at")
+        .in_("repo_id", repo_ids)
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
         .execute()
@@ -235,7 +257,14 @@ def history(
         if d["run_id"] not in diag_map:
             diag_map[d["run_id"]] = d
 
-    return [{**r, "diagnosis": diag_map.get(r["id"])} for r in runs]
+    return [
+        {
+            **r,
+            "repo_full_name": repo_lookup.get(r["repo_id"], ""),
+            "diagnosis": diag_map.get(r["id"]),
+        }
+        for r in runs
+    ]
 
 
 # ── GET /runs/dashboard/stats ─────────────────────────────────────────────────
