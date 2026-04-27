@@ -2,7 +2,6 @@ import json
 import logging
 import time
 
-from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 
 from app.config import settings
@@ -16,12 +15,26 @@ logger = logging.getLogger(__name__)
 kimi = AsyncOpenAI(
     api_key=settings.kimi_api_key,
     base_url=settings.kimi_base_url,
-    timeout=120.0,                    # Moonshot can be slow on long logs
+    timeout=120.0,
 )
 
-claude = (
-    AsyncAnthropic(api_key=settings.anthropic_api_key)
-    if settings.anthropic_api_key
+nvidia = (
+    AsyncOpenAI(
+        api_key=settings.nvidia_api_key,
+        base_url=settings.nvidia_base_url,
+        timeout=90.0,
+    )
+    if settings.nvidia_api_key
+    else None
+)
+
+gemini = (
+    AsyncOpenAI(
+        api_key=settings.gemini_api_key,
+        base_url=settings.gemini_base_url,
+        timeout=90.0,
+    )
+    if settings.gemini_api_key
     else None
 )
 
@@ -120,39 +133,59 @@ async def _call_kimi(messages: list, tool_schema: dict):
     return None, prose, usage
 
 
-async def _call_claude_fallback(messages: list, tool_schema: dict):
-    if not claude:
+async def _call_openai_compatible_fallback(
+    client: AsyncOpenAI,
+    model: str,
+    messages: list,
+    tool_schema: dict,
+    label: str,
+) -> tuple:
+    """
+    Generic fallback for any OpenAI-compatible endpoint (NVIDIA NIM, Gemini, etc.).
+    Returns (parsed_args_or_none, raw_content, usage_info).
+    """
+    if not client:
         return None, "", {}
-    anthropic_tool = {
-        "name": tool_schema["name"],
-        "description": tool_schema["description"],
-        "input_schema": tool_schema["parameters"],
-    }
-    system = next((m["content"] for m in messages if m["role"] == "system"), "")
-    user_messages = [m for m in messages if m["role"] != "system"]
     start = time.time()
     try:
-        response = await claude.messages.create(
-            model="claude-sonnet-4-6",
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=[{"type": "function", "function": tool_schema}],
+            tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
             max_tokens=8000,
-            system=system,
-            messages=user_messages,
-            tools=[anthropic_tool],
-            tool_choice={"type": "tool", "name": tool_schema["name"]},
+            temperature=0.2,
         )
     except Exception as e:
-        logger.error(f"Claude fallback also failed: {e}")
-        return None, "", {}
+        logger.error(f"{label} fallback failed: {e}")
+        return None, str(e)[:200], {"latency_ms": int((time.time() - start) * 1000)}
+
     latency_ms = int((time.time() - start) * 1000)
     usage = {
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
+        "input_tokens": response.usage.prompt_tokens if response.usage else None,
+        "output_tokens": response.usage.completion_tokens if response.usage else None,
         "latency_ms": latency_ms,
     }
-    tool_block = next((b for b in response.content if b.type == "tool_use"), None)
-    if not tool_block:
-        return None, "", usage
-    return tool_block.input, json.dumps(tool_block.input), usage
+
+    msg = response.choices[0].message
+
+    if msg.tool_calls:
+        try:
+            args = json.loads(msg.tool_calls[0].function.arguments)
+            return args, msg.tool_calls[0].function.arguments, usage
+        except json.JSONDecodeError:
+            raw = msg.tool_calls[0].function.arguments
+            extracted = _extract_json_from_prose(raw)
+            if extracted:
+                return extracted, raw, usage
+            return None, raw, usage
+
+    prose = msg.content or ""
+    extracted = _extract_json_from_prose(prose)
+    if extracted:
+        return extracted, prose, usage
+
+    return None, prose, usage
 
 
 def _log_agent_call(run_id, call_type, model, messages, raw, parsed, usage, valid, error=None):
@@ -190,7 +223,7 @@ async def call_with_tool(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Attempt 1
+    # Attempt 1: Kimi K2.6
     args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
                     valid=(args is not None), error="No tool call in response" if args is None else None)
@@ -198,24 +231,38 @@ async def call_with_tool(
         return args
     logger.warning("Kimi attempt 1: no valid tool call — retrying")
 
-    # Attempt 2: retry with same params (model is non-deterministic enough to differ)
+    # Attempt 2: Kimi retry
     args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
                     valid=(args is not None), error="No tool call after retry" if args is None else None)
     if args is not None:
         return args
-    logger.warning("Kimi attempt 2: still no valid tool call — activating Claude fallback")
+    logger.warning("Kimi attempt 2: still no valid tool call — trying NVIDIA NIM fallback")
 
-    # Attempt 3: Claude Sonnet 4.6 fallback
-    if claude:
-        args, raw, usage = await _call_claude_fallback(messages, tool_schema)
-        _log_agent_call(run_id, call_type, "claude-sonnet-4-6", messages, raw, args, usage,
-                        valid=(args is not None), error="Claude fallback also returned no tool call" if args is None else None)
+    # Attempt 3: NVIDIA NIM (meta/llama-3.3-70b-instruct)
+    if nvidia:
+        args, raw, usage = await _call_openai_compatible_fallback(
+            nvidia, settings.nvidia_model, messages, tool_schema, "NVIDIA NIM"
+        )
+        _log_agent_call(run_id, call_type, settings.nvidia_model, messages, raw, args, usage,
+                        valid=(args is not None), error="NVIDIA NIM returned no tool call" if args is None else None)
         if args is not None:
-            logger.info("Claude fallback succeeded")
+            logger.info("NVIDIA NIM fallback succeeded")
+            return args
+        logger.warning("NVIDIA NIM fallback: no valid tool call — trying Gemini fallback")
+
+    # Attempt 4: Gemini 2.0 Flash
+    if gemini:
+        args, raw, usage = await _call_openai_compatible_fallback(
+            gemini, settings.gemini_model, messages, tool_schema, "Gemini"
+        )
+        _log_agent_call(run_id, call_type, settings.gemini_model, messages, raw, args, usage,
+                        valid=(args is not None), error="Gemini also returned no tool call" if args is None else None)
+        if args is not None:
+            logger.info("Gemini fallback succeeded")
             return args
 
     raise DiagnosisValidationError(
-        "All 3 model attempts (Kimi x2 + Claude fallback) returned no valid tool call. "
+        "All 4 model attempts (Kimi x2 + NVIDIA NIM + Gemini) returned no valid tool call. "
         "Check agent_calls table for raw responses."
     )
