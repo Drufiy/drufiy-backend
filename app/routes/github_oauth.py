@@ -50,6 +50,8 @@ async def github_callback(body: OAuthCallbackRequest):
         )
 
     access_token = token_data["access_token"]
+    granted_scopes = token_data.get("scope", "")
+    logger.info(f"GitHub OAuth granted scopes: {granted_scopes!r}")
     gh_headers = {
         "Authorization": f"Bearer {access_token}",
         "Accept": "application/vnd.github+json",
@@ -59,6 +61,9 @@ async def github_callback(body: OAuthCallbackRequest):
     async with httpx.AsyncClient(timeout=10.0) as client:
         user_resp = await client.get("https://api.github.com/user", headers=gh_headers)
         user_resp.raise_for_status()
+        # GitHub echoes the token's scopes in the response header
+        response_scopes = user_resp.headers.get("X-OAuth-Scopes", granted_scopes)
+        logger.info(f"GitHub token scopes (from response header): {response_scopes!r}")
         gh_user = user_resp.json()
 
         email = gh_user.get("email")
@@ -115,6 +120,46 @@ async def me(current_user: dict = Depends(get_current_user)):
         "github_username": current_user["github_username"],
         "email": current_user.get("email"),
     }
+
+
+@router.get("/scopes")
+async def check_scopes(current_user: dict = Depends(get_current_user)):
+    """
+    Returns whether the stored GitHub token includes the 'workflow' scope.
+    Calls GET /user and reads the X-OAuth-Scopes response header from GitHub.
+    """
+    user_id = current_user["id"]
+    try:
+        result = supabase.rpc(
+            "get_decrypted_token",
+            {"p_user_id": user_id, "p_key": settings.jwt_secret},
+        ).execute()
+        access_token = result.data
+    except Exception as e:
+        logger.warning(f"Scope check: failed to decrypt token for user {user_id}: {e}")
+        return {"has_workflow_scope": False, "scopes": []}
+
+    if not access_token:
+        return {"has_workflow_scope": False, "scopes": []}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                "https://api.github.com/user",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+        scopes_header = resp.headers.get("X-OAuth-Scopes", "")
+        scopes = [s.strip() for s in scopes_header.split(",") if s.strip()]
+        has_workflow = "workflow" in scopes
+        logger.info(f"Scope check for user {user_id}: {scopes}, has_workflow={has_workflow}")
+        return {"has_workflow_scope": has_workflow, "scopes": scopes}
+    except Exception as e:
+        logger.warning(f"Scope check: GitHub request failed for user {user_id}: {e}")
+        return {"has_workflow_scope": False, "scopes": []}
 
 
 @router.post("/logout")
