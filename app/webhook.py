@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
@@ -283,16 +283,68 @@ async def github_webhook(
         logger.warning(f"Rate limit hit for repo {repo_full_name}")
         return {"status": "rate_limited"}
 
-    # Insert ci_run row
+    commit_sha = workflow_run.get("head_sha", "")
+    commit_message = (workflow_run.get("head_commit") or {}).get("message", "")
+    github_run_id = workflow_run["id"]
+
+    # ── M-4: Dedupe by (repo_id, commit_sha, github_run_id) ──────────────────
+    # Prevents duplicate ci_runs from webhook redeliveries or simultaneous events.
+    existing = (
+        supabase.table("ci_runs")
+        .select("id, status")
+        .eq("repo_id", repo["id"])
+        .eq("commit_sha", commit_sha)
+        .eq("github_run_id", github_run_id)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        logger.info(
+            f"Dedupe: ci_run already exists for repo={repo_full_name} "
+            f"sha={commit_sha[:8]} run_id={github_run_id} → {existing.data[0]['id']}"
+        )
+        return {"status": "duplicate_ignored", "ci_run_id": existing.data[0]["id"]}
+
+    # ── M-4: Skip merge commits from Drufiy PRs ───────────────────────────────
+    # When a Drufiy fix PR is merged, GitHub fires a new workflow_run on the merge
+    # commit. Without this guard, Prash would try to "fix" its own fix. Detect by:
+    # 1. Commit message starts with "Merge" and contains "drufiy/fix-run-"
+    # 2. OR: the commit_sha matches the head of a recently-verified/fixed run
+    if FIX_BRANCH_PREFIX in commit_message and commit_message.strip().startswith("Merge"):
+        logger.info(
+            f"Skipping merge commit of Drufiy PR — repo={repo_full_name} "
+            f"sha={commit_sha[:8]} msg={commit_message[:80]!r}"
+        )
+        return {"status": "merge_of_drufiy_pr_ignored"}
+
+    # Fallback: check if this commit_sha is the head of a recently-fixed run
+    # (catches edge cases where the merge commit message format differs)
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    recent_fixes = (
+        supabase.table("ci_runs")
+        .select("commit_sha")
+        .eq("repo_id", repo["id"])
+        .in_("status", ["verified", "fixed"])
+        .gte("created_at", recent_cutoff)
+        .execute()
+    )
+    fixed_shas = {r["commit_sha"] for r in (recent_fixes.data or [])}
+    if commit_sha in fixed_shas:
+        logger.info(
+            f"Skipping commit that is a recent Drufiy fix — repo={repo_full_name} sha={commit_sha[:8]}"
+        )
+        return {"status": "recent_fix_sha_ignored"}
+
+    # Insert ci_run row (commit_sha, commit_message, github_run_id already extracted above)
     insert = supabase.table("ci_runs").insert({
         "repo_id": repo["id"],
-        "github_run_id": workflow_run["id"],
+        "github_run_id": github_run_id,
         "github_workflow_id": workflow_run.get("workflow_id"),
         "github_workflow_name": workflow_run.get("name"),
         "run_name": workflow_run.get("display_title") or workflow_run.get("name"),
         "branch": branch,
-        "commit_sha": workflow_run.get("head_sha", ""),
-        "commit_message": (workflow_run.get("head_commit") or {}).get("message", ""),
+        "commit_sha": commit_sha,
+        "commit_message": commit_message,
         "status": "pending",
         "logs_url": workflow_run.get("logs_url"),
     }).execute()
