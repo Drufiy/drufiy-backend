@@ -385,6 +385,7 @@ async def diagnose_failure(
     previous_diagnosis: dict | None = None,
     run_id: str | None = None,
     current_files: dict[str, str] | None = None,   # {path: content} fetched from GitHub
+    force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
 ) -> Diagnosis:
     """
     Run Kimi K2.6 diagnosis on CI logs. Returns a validated Diagnosis object.
@@ -407,7 +408,20 @@ async def diagnose_failure(
         preprocessed, repo_full_name, commit_message,
         workflow_name, iteration, previous_diagnosis, current_files,
     )
+
+    # Force-fix: user has explicitly authorized — append strong override instruction
+    if force_fix:
+        user_prompt += (
+            "\n\n⚠️ USER OVERRIDE: The user has reviewed the previous diagnosis and explicitly authorized "
+            "you to attempt a fix even if uncertain. You MUST produce files_changed. "
+            "Do NOT return manual_required — use review_recommended with your best-guess fix. "
+            "Even a partial or speculative fix is better than no fix."
+        )
+        logger.info(f"Force-fix mode enabled for run {run_id}")
+
     call_type = "iteration_2_diagnosis" if iteration == 2 else "diagnosis"
+    if force_fix:
+        call_type = "force_fix_diagnosis"
 
     raw_args = await call_with_tool(
         system_prompt=SYSTEM_PROMPT,

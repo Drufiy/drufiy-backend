@@ -1,10 +1,12 @@
 import asyncio
 import base64
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel
 
 from app.auth import get_current_user
 from app.config import settings
@@ -297,3 +299,381 @@ async def dry_run(run_id: str, current_user: dict = Depends(get_current_user)):
     overall = "safe_to_apply" if (all_low and diagnosis["fix_type"] == "safe_auto_apply") else "review_before_applying"
 
     return {"run_id": run_id, "diff_preview": diff_preview, "overall_recommendation": overall}
+
+
+# ── POST /runs/{run_id}/force-fix ─────────────────────────────────────────────
+
+async def _run_force_fix(run_id: str, access_token: str):
+    """Background task: re-diagnose with force_fix=True, then open a PR."""
+    from app.agent.diagnosis_agent import diagnose_failure, DiagnosisValidationError
+    from app.agent.log_fetcher import fetch_workflow_logs
+    from app.agent.pr_creator import create_fix_pr
+
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        ci_run = supabase.table("ci_runs").select("*, connected_repos(*)").eq("id", run_id).single().execute().data
+        if not ci_run:
+            logger.error(f"force-fix: run {run_id} not found")
+            return
+
+        repo = ci_run["connected_repos"]
+        repo_full_name = repo["repo_full_name"]
+
+        # Re-fetch logs
+        logs = ""
+        try:
+            logs = await fetch_workflow_logs(
+                github_run_id=ci_run["github_run_id"],
+                repo_full_name=repo_full_name,
+                access_token=access_token,
+            )
+        except Exception as e:
+            logger.warning(f"force-fix: could not fetch logs for {run_id}: {e}")
+
+        supabase.table("ci_runs").update({"status": "diagnosing", "updated_at": now}).eq("id", run_id).execute()
+
+        # Re-run diagnosis with force_fix=True
+        diagnosis = await diagnose_failure(
+            logs=logs,
+            repo_full_name=repo_full_name,
+            commit_message=ci_run.get("commit_message", ""),
+            workflow_name=ci_run.get("github_workflow_name", "CI"),
+            run_id=run_id,
+            force_fix=True,
+        )
+
+        # Store the new diagnosis
+        iteration = (supabase.table("diagnoses").select("iteration").eq("run_id", run_id)
+                     .order("iteration", desc=True).limit(1).execute().data or [{}])[0].get("iteration", 0) + 1
+        supabase.table("diagnoses").insert({
+            "run_id": run_id,
+            "iteration": iteration,
+            "problem_summary": diagnosis.problem_summary,
+            "root_cause": diagnosis.root_cause,
+            "fix_description": diagnosis.fix_description,
+            "fix_type": diagnosis.fix_type,
+            "confidence": diagnosis.confidence,
+            "is_flaky_test": diagnosis.is_flaky_test,
+            "files_changed": [fc.model_dump() for fc in diagnosis.files_changed],
+            "category": diagnosis.category,
+            "logs_truncated_warning": diagnosis.logs_truncated_warning,
+        }).execute()
+
+        if diagnosis.fix_type == "manual_required" or not diagnosis.files_changed:
+            supabase.table("ci_runs").update({
+                "status": "diagnosed",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", run_id).execute()
+            logger.info(f"force-fix: {run_id} still manual_required after forced re-diagnosis")
+            return
+
+        # Apply the fix
+        supabase.table("ci_runs").update({"status": "applying", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", run_id).execute()
+        pr_result = await create_fix_pr(
+            repo_full_name=repo_full_name,
+            access_token=access_token,
+            run_id=run_id,
+            diagnosis=diagnosis.model_dump(),
+        )
+        supabase.table("ci_runs").update({
+            "status": "fixed",
+            "fix_branch_name": pr_result["branch"],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", run_id).execute()
+        logger.info(f"force-fix: PR created for {run_id} → {pr_result.get('pr_url')}")
+
+    except DiagnosisValidationError as e:
+        logger.error(f"force-fix: diagnosis validation failed for {run_id}: {e}")
+        supabase.table("ci_runs").update({"status": "diagnosis_failed", "error_message": str(e)[:500],
+                                          "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", run_id).execute()
+    except Exception as e:
+        logger.exception(f"force-fix: unexpected error for {run_id}: {e}")
+        supabase.table("ci_runs").update({"status": "diagnosis_failed", "error_message": str(e)[:500],
+                                          "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", run_id).execute()
+
+
+@router.post("/{run_id}/force-fix")
+async def force_fix(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Bypass manual_required — re-diagnose with an explicit forcing prompt
+    that instructs the model to produce files_changed even if uncertain.
+    """
+    ci_run = _get_run_with_ownership(run_id, current_user["id"])
+    if ci_run["status"] not in ("diagnosed", "diagnosis_failed", "exhausted"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_state", "message": f"Run is {ci_run['status']}, not eligible for force-fix"},
+        )
+    access_token = current_user["github_access_token"]
+    if not access_token:
+        raise HTTPException(status_code=401, detail={"error": "no_token"})
+
+    background_tasks.add_task(_run_force_fix, run_id, access_token)
+    return {"status": "force_fix_queued", "run_id": run_id}
+
+
+# ── POST /runs/{run_id}/add-secret ────────────────────────────────────────────
+
+class AddSecretRequest(BaseModel):
+    name: str
+    value: str
+
+
+@router.post("/{run_id}/add-secret")
+async def add_secret(
+    run_id: str,
+    body: AddSecretRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Add a GitHub Actions secret to the repo, then re-trigger the failed workflow.
+    Uses GitHub's public-key sealed-box encryption (libsodium via PyNaCl).
+    """
+    ci_run = _get_run_with_ownership(run_id, current_user["id"])
+    repo = ci_run.get("connected_repos") or (
+        supabase.table("connected_repos").select("*").eq("id", ci_run["repo_id"]).single().execute().data
+    )
+    repo_full_name = repo["repo_full_name"]
+    access_token = current_user["github_access_token"]
+    if not access_token:
+        raise HTTPException(status_code=401, detail={"error": "no_token"})
+
+    headers = _gh_headers(access_token)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        # 1. Fetch repo public key for secret encryption
+        pk_resp = await client.get(
+            f"{GITHUB_API}/repos/{repo_full_name}/actions/secrets/public-key",
+            headers=headers,
+        )
+        if pk_resp.status_code != 200:
+            raise HTTPException(status_code=502, detail={"error": "github_pubkey_failed", "detail": pk_resp.text})
+
+        pk_data = pk_resp.json()
+        key_id = pk_data["key_id"]
+        pub_key_b64 = pk_data["key"]
+
+        # 2. Encrypt the secret value using libsodium sealed box
+        try:
+            from nacl.public import PublicKey, SealedBox
+            from nacl.encoding import Base64Encoder
+            pub_key_bytes = base64.b64decode(pub_key_b64)
+            sealed_box = SealedBox(PublicKey(pub_key_bytes))
+            encrypted = sealed_box.encrypt(body.value.encode("utf-8"))
+            encrypted_b64 = base64.b64encode(encrypted).decode("utf-8")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"error": "encryption_failed", "detail": str(e)})
+
+        # 3. PUT the secret
+        secret_resp = await client.put(
+            f"{GITHUB_API}/repos/{repo_full_name}/actions/secrets/{body.name}",
+            headers=headers,
+            json={"encrypted_value": encrypted_b64, "key_id": key_id},
+        )
+        if secret_resp.status_code not in (201, 204):
+            raise HTTPException(status_code=502, detail={"error": "github_secret_failed", "detail": secret_resp.text})
+
+        # 4. Re-run the failed workflow jobs
+        rerun_resp = await client.post(
+            f"{GITHUB_API}/repos/{repo_full_name}/actions/runs/{ci_run['github_run_id']}/rerun-failed-jobs",
+            headers=headers,
+        )
+        rerun_ok = rerun_resp.status_code in (201, 204)
+        if not rerun_ok:
+            logger.warning(f"add-secret: rerun failed for run {run_id}: {rerun_resp.status_code} {rerun_resp.text[:200]}")
+
+    # Reset ci_run status to pending so it can be re-processed
+    supabase.table("ci_runs").update({
+        "status": "pending",
+        "error_message": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", run_id).execute()
+
+    return {
+        "status": "secret_added",
+        "secret_name": body.name,
+        "workflow_rerun": rerun_ok,
+    }
+
+
+# ── POST /runs/{run_id}/skip-test ─────────────────────────────────────────────
+
+class SkipTestRequest(BaseModel):
+    test_name: str
+    test_file: Optional[str] = None  # if known, speeds up lookup
+
+
+@router.post("/{run_id}/skip-test")
+async def skip_test(
+    run_id: str,
+    body: SkipTestRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Open a fix PR that marks the specified test as skipped.
+    Works for pytest (adds @pytest.mark.skip) and jest (adds test.skip / xtest).
+    """
+    ci_run = _get_run_with_ownership(run_id, current_user["id"])
+    diagnosis = _get_latest_diagnosis(run_id)
+    repo = ci_run.get("connected_repos") or (
+        supabase.table("connected_repos").select("*").eq("id", ci_run["repo_id"]).single().execute().data
+    )
+    repo_full_name = repo["repo_full_name"]
+    default_branch = repo.get("default_branch", "main")
+    access_token = current_user["github_access_token"]
+    if not access_token:
+        raise HTTPException(status_code=401, detail={"error": "no_token"})
+
+    headers = _gh_headers(access_token)
+    test_name = body.test_name
+    test_file = body.test_file
+
+    # If test_file not provided, try to infer from diagnosis problem_summary
+    if not test_file and diagnosis:
+        summary = diagnosis.get("problem_summary", "")
+        # Look for patterns like "test_foo.py::test_bar" or "tests/test_foo.py"
+        import re
+        match = re.search(r"(tests?/[\w/]+\.py)", summary)
+        if match:
+            test_file = match.group(1)
+
+    if not test_file:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "test_file_required", "message": "Could not infer test file from diagnosis. Please provide test_file."},
+        )
+
+    # Fetch the test file from GitHub
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        file_resp = await client.get(
+            f"{GITHUB_API}/repos/{repo_full_name}/contents/{test_file}",
+            headers=headers,
+            params={"ref": default_branch},
+        )
+        if file_resp.status_code != 200:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "test_file_not_found", "message": f"{test_file} not found in {default_branch}"},
+            )
+
+    file_data = file_resp.json()
+    current_content = base64.b64decode(file_data["content"]).decode("utf-8", errors="replace")
+
+    # Detect test framework and add skip decorator
+    is_pytest = test_file.endswith(".py")
+    is_jest = test_file.endswith((".ts", ".tsx", ".js", ".jsx"))
+
+    new_content = current_content
+    if is_pytest:
+        # Add @pytest.mark.skip before the failing test function
+        import re
+        # Try to find "def test_name(" pattern and insert skip decorator
+        pattern = re.compile(rf"^([ \t]*)(async def|def)\s+({re.escape(test_name)})\s*\(", re.MULTILINE)
+        match = re.search(pattern, current_content)
+        if match:
+            indent = match.group(1)
+            insert_pos = match.start()
+            skip_line = f'{indent}@pytest.mark.skip(reason="Skipped by Drufiy — flaky or placeholder test")\n'
+            new_content = current_content[:insert_pos] + skip_line + current_content[insert_pos:]
+            # Ensure pytest is imported
+            if "import pytest" not in new_content:
+                new_content = "import pytest\n" + new_content
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "test_not_found", "message": f"Could not find 'def {test_name}(' in {test_file}"},
+            )
+    elif is_jest:
+        # Replace "test(" or "it(" with "test.skip(" or "it.skip("
+        import re
+        pattern = re.compile(rf"(test|it)\s*\(\s*['\"]({re.escape(test_name)})['\"]")
+        if re.search(pattern, current_content):
+            new_content = re.sub(pattern, r"\1.skip('\2'", current_content)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "test_not_found", "message": f"Could not find test '{test_name}' in {test_file}"},
+            )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "unsupported_framework", "message": "Only pytest (.py) and jest (.ts/.js) are supported"},
+        )
+
+    if new_content == current_content:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "no_change", "message": "Test file was not modified — test name may not match exactly"},
+        )
+
+    # Create a fix PR with the modified test file
+    from app.agent.diagnosis_agent import Diagnosis
+    from app.agent.schemas import FileChange
+    from app.agent.pr_creator import create_fix_pr
+
+    skip_diagnosis = {
+        "id": f"skip-test-{run_id}",
+        "fix_type": "safe_auto_apply",
+        "files_changed": [{
+            "path": test_file,
+            "new_content": new_content,
+            "explanation": f"Skipped test '{test_name}' — marked as flaky/placeholder by user via Drufiy",
+        }],
+    }
+
+    try:
+        pr_result = await create_fix_pr(
+            repo_full_name=repo_full_name,
+            access_token=access_token,
+            run_id=run_id,
+            diagnosis=skip_diagnosis,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "pr_failed", "detail": str(e)})
+
+    supabase.table("ci_runs").update({
+        "status": "fixed",
+        "fix_branch_name": pr_result["branch"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", run_id).execute()
+
+    return {**pr_result, "skipped_test": test_name, "test_file": test_file}
+
+
+# ── POST /runs/{run_id}/rediagnose ────────────────────────────────────────────
+
+@router.post("/{run_id}/rediagnose")
+async def rediagnose(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Clear the current diagnosis and re-queue the run for a fresh diagnosis.
+    The processor will use a different model attempt (rotates through the chain).
+    """
+    ci_run = _get_run_with_ownership(run_id, current_user["id"])
+    if ci_run["status"] in ("diagnosing", "applying"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "already_in_progress", "message": "Run is currently being processed"},
+        )
+
+    # Reset to pending — the background processor will pick it up fresh
+    supabase.table("ci_runs").update({
+        "status": "pending",
+        "error_message": None,
+        "fix_branch_name": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", run_id).execute()
+
+    logger.info(f"rediagnose: run {run_id} reset to pending by user {current_user['id']}")
+
+    from app.agent.processor import process_failure
+    background_tasks.add_task(process_failure, run_id)
+
+    return {"status": "rediagnose_queued", "run_id": run_id}
