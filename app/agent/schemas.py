@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FileChange(BaseModel):
@@ -35,15 +35,21 @@ class Diagnosis(BaseModel):
     category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "unknown"]
     logs_truncated_warning: bool = Field(default=False)
 
-    @field_validator("files_changed")
-    @classmethod
-    def validate_files_for_fix_type(cls, v, info):
-        fix_type = info.data.get("fix_type")
-        if fix_type == "manual_required" and len(v) > 0:
-            raise ValueError("manual_required diagnoses must have empty files_changed")
-        # NOTE: review_recommended with no files is handled as a business-rule downgrade
-        # to manual_required in diagnose_failure() — do NOT raise here, or the whole
-        # diagnosis is rejected and the run fails instead of gracefully degrading.
-        if fix_type == "safe_auto_apply" and len(v) == 0:
-            raise ValueError("safe_auto_apply must have at least one file change")
-        return v
+    @model_validator(mode="after")
+    def coerce_fix_type(self) -> "Diagnosis":
+        """
+        Auto-coerce inconsistent fix_type / files_changed combinations instead
+        of hard-failing validation and killing the entire pipeline run.
+
+        Rules:
+        - safe_auto_apply or review_recommended with NO files → downgrade to manual_required
+          (model said it would fix but produced nothing — treat as "can't fix")
+        - manual_required WITH files → upgrade to review_recommended
+          (model said it couldn't fix but produced a fix anyway — surface it for review)
+        """
+        has_files = bool(self.files_changed)
+        if self.fix_type in ("safe_auto_apply", "review_recommended") and not has_files:
+            self.fix_type = "manual_required"
+        elif self.fix_type == "manual_required" and has_files:
+            self.fix_type = "review_recommended"
+        return self

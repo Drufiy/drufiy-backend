@@ -405,9 +405,8 @@ async def diagnose_failure(
         updates["fix_type"] = "manual_required"
         updates["files_changed"] = []
 
-    if diagnosis.fix_type == "review_recommended" and len(diagnosis.files_changed) == 0:
-        logger.warning("review_recommended with no files_changed — downgrading to manual_required")
-        updates["fix_type"] = "manual_required"
+    # NOTE: review_recommended/safe_auto_apply ↔ manual_required coercion is now handled
+    # automatically by Diagnosis.coerce_fix_type() @model_validator — no need to duplicate here.
 
     if updates:
         diagnosis = diagnosis.model_copy(update=updates)
