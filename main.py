@@ -103,9 +103,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Drufiy Backend", version="0.1.0", lifespan=lifespan)
 
 _cors_origins = list({
-    settings.frontend_url,           # from FRONTEND_URL env var (Cloud Run)
-    "http://localhost:3000",          # local dev
-    "https://prashbydrufiy.vercel.app",  # production Vercel — explicit fallback
+    settings.frontend_url,                # from FRONTEND_URL env var (Cloud Run)
+    "http://localhost:3000",              # local dev
+    "https://drufiy-web.vercel.app",      # old Vercel URL
+    "https://prashbydrufiy.vercel.app",   # new production URL
 })
 app.add_middleware(
     CORSMiddleware,
