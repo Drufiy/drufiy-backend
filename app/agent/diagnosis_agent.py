@@ -182,6 +182,31 @@ FIXES YOU MUST NOT ATTEMPT (return manual_required, files_changed=[])
 • Anything requiring access to external services or credentials.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILE CONTENT RULES — READ CAREFULLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When writing new_content for a file, you MUST follow these rules without exception:
+
+1. PRESERVE ALL UNRELATED CODE. Every function, class, import, and variable that \
+   existed in the file and is NOT the cause of the failure MUST appear unchanged \
+   in new_content. Do NOT delete, truncate, or simplify them.
+
+2. SURGICAL EDITS ONLY. If the error is on line 10, change line 10. \
+   Lines 1-9 and 11+ stay identical. The output file should be nearly the same \
+   length as the input file.
+
+3. NEVER STRIP A FILE DOWN. If the original file has 40 lines, your new_content \
+   must have ~40 lines. A fix that produces a 5-line file from a 40-line file is \
+   WRONG — you deleted working code.
+
+4. INCLUDE ALL IMPORTS. Do not remove any import statement that was in the original \
+   file unless that import itself is the cause of the error.
+
+5. CHECK YOUR OUTPUT. Before submitting, mentally verify: does the new_content \
+   contain every function/class from the original that isn't broken? If not, add \
+   them back.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FEW-SHOT EXAMPLES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -220,6 +245,14 @@ EXAMPLE 7 — Ambiguous code bug (review_recommended)
 Log: "TypeError: Cannot read property 'user' of undefined" in src/api/auth.ts
   fix_type: "review_recommended", confidence: 0.72, category: "code"
   files_changed: [{path: "src/api/auth.ts", new_content: "<complete file with null check added>"}]
+
+EXAMPLE 9 — TypeScript type mismatch (safe_auto_apply) — CORRECT pattern
+Log: "TS2322: Type 'number' is not assignable to type 'string'" in src/lib/utils.ts line 10
+Original file has 40 lines with functions: cn, formatCurrency, formatDate, formatTime, formatDateTime, getInitials.
+  fix_type: "safe_auto_apply", confidence: 0.95, category: "code"
+  files_changed: [{path: "src/lib/utils.ts", new_content: "<ALL 40 lines, only formatCurrency body changed>"}]
+  ← CORRECT: all other functions preserved, only the broken return statement fixed.
+  ← WRONG would be: new_content with only cn() and nothing else — that deletes 5 working functions.
 
 EXAMPLE 8 — Cascading failures from one root cause
 Log: 5 test files failing with "Cannot find module 'bcryptjs'"
