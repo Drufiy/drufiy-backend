@@ -696,17 +696,22 @@ async def _sleep(seconds: int):
 
 async def _diagnose_with_parallel_models(**kwargs):
     """
-    Run Kimi and DeepSeek in parallel and take the first valid diagnosis.
-    Falls back cleanly if DeepSeek is not configured.
+    Run Kimi and DeepSeek in parallel.
+    Return the first confident diagnosis immediately, but keep both results
+    when the first one is low-confidence or unknown so we can merge them.
     """
     kimi_task = asyncio.create_task(diagnose_failure(model="kimi", **kwargs))
+    task_labels = {kimi_task: "kimi"}
     tasks = {kimi_task}
 
     deepseek_enabled = bool(settings.deepseek_api_key)
     if deepseek_enabled:
-        tasks.add(asyncio.create_task(diagnose_failure(model="deepseek", **kwargs)))
+        deepseek_task = asyncio.create_task(diagnose_failure(model="deepseek", **kwargs))
+        tasks.add(deepseek_task)
+        task_labels[deepseek_task] = "deepseek"
 
     errors: list[str] = []
+    results: list[tuple[str, object]] = []
     try:
         while tasks:
             done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -722,18 +727,79 @@ async def _diagnose_with_parallel_models(**kwargs):
                     tasks.remove(task)
                     continue
 
-                for other in pending:
-                    other.cancel()
-                return result
+                label = task_labels.get(task, "unknown")
+                results.append((label, result))
+
+                needs_consensus = (
+                    result.category == "unknown" or result.confidence < 0.5
+                )
+                if not needs_consensus or not pending:
+                    for other in pending:
+                        other.cancel()
+                    return result
+
+            if len(results) >= 2:
+                return _merge_diagnoses(results[0][1], results[1][1])
 
             tasks = pending
     finally:
         for task in tasks:
             task.cancel()
 
+    if len(results) >= 2:
+        return _merge_diagnoses(results[0][1], results[1][1])
+    if results:
+        return results[0][1]
     if errors:
         raise DiagnosisValidationError(" | ".join(errors[:2]))
     raise DiagnosisValidationError("No model returned a valid diagnosis.")
+
+
+def _merge_diagnoses(primary, secondary):
+    if _diagnoses_agree(primary, secondary):
+        higher = primary if primary.confidence >= secondary.confidence else secondary
+        boosted_confidence = min(max(primary.confidence, secondary.confidence) + 0.1, 1.0)
+        return higher.model_copy(update={"confidence": boosted_confidence})
+
+    if primary.category == "unknown" and secondary.category != "unknown" and secondary.confidence >= 0.5:
+        return secondary
+    if secondary.category == "unknown" and primary.category != "unknown" and primary.confidence >= 0.5:
+        return primary
+
+    if secondary.confidence > primary.confidence and secondary.confidence >= 0.5:
+        return secondary
+    if primary.confidence > secondary.confidence and primary.confidence >= 0.5:
+        return primary
+
+    higher = primary if primary.confidence >= secondary.confidence else secondary
+    return higher.model_copy(
+        update={
+            "category": "unknown",
+            "fix_type": "manual_required",
+            "files_changed": [],
+            "root_cause": (
+                f"Kimi and DeepSeek disagreed on the root cause. "
+                f"Primary: {primary.root_cause} Secondary: {secondary.root_cause}"
+            )[:2000],
+        }
+    )
+
+
+def _diagnoses_agree(primary, secondary) -> bool:
+    if primary.category != secondary.category and "unknown" not in {primary.category, secondary.category}:
+        return False
+
+    primary_keywords = _keyword_set(f"{primary.problem_summary} {primary.root_cause}")
+    secondary_keywords = _keyword_set(f"{secondary.problem_summary} {secondary.root_cause}")
+    overlap = len(primary_keywords & secondary_keywords)
+    return overlap >= 3
+
+
+def _keyword_set(text: str) -> set[str]:
+    return {
+        token for token in re.findall(r"[a-z0-9_]+", text.lower())
+        if len(token) > 2
+    }
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
