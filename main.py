@@ -213,6 +213,12 @@ try:
 except ImportError:
     logger.warning("app.webhook not found — skipping")
 
+try:
+    from app.routes.internal import router as internal_router
+    app.include_router(internal_router, prefix="/internal", tags=["internal"])
+except ImportError:
+    logger.warning("app.routes.internal not found — skipping")
+
 
 if __name__ == "__main__":
     import uvicorn
