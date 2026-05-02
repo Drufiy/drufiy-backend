@@ -417,6 +417,8 @@ async def diagnose_failure(
     iteration: int = 1,
     previous_diagnosis: dict | None = None,
     run_id: str | None = None,
+    commit_sha: str | None = None,
+    commit_diff: str | None = None,
     current_files: dict[str, str] | None = None,   # {path: content} fetched from GitHub
     force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
 ) -> Diagnosis:
@@ -439,7 +441,7 @@ async def diagnose_failure(
 
     user_prompt = _build_user_prompt(
         preprocessed, repo_full_name, commit_message,
-        workflow_name, iteration, previous_diagnosis, current_files,
+        workflow_name, iteration, previous_diagnosis, current_files, commit_sha, commit_diff,
     )
 
     # Force-fix: user has explicitly authorized — append strong override instruction
@@ -511,6 +513,8 @@ def _build_user_prompt(
     iteration: int,
     previous_diagnosis: dict | None,
     current_files: dict[str, str] | None,
+    commit_sha: str | None,
+    commit_diff: str | None,
 ) -> str:
     parts = [
         f"REPOSITORY: {repo_full_name}",
@@ -518,11 +522,18 @@ def _build_user_prompt(
         f"COMMIT MESSAGE: {commit_message}",
     ]
 
+    if commit_sha:
+        parts.append(f"COMMIT SHA: {commit_sha}")
+
     # Inject current file contents so Kimi can write complete replacements
     if current_files:
         parts.append("\nCURRENT FILE CONTENTS (use these to write complete replacements):")
         for path, content in current_files.items():
             parts.append(f"\n=== {path} ===\n{content}\n=== end {path} ===")
+
+    if commit_diff:
+        parts.append(f"\nCOMMIT DIFF (what changed to break CI):\n---\n{commit_diff}\n---")
+        parts.append("The fix should likely modify these same files unless the logs clearly point elsewhere.")
 
     parts.append(f"\nCI FAILURE LOGS:\n---\n{logs}\n---")
 

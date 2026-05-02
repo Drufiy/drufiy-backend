@@ -46,6 +46,7 @@ async def process_failure(ci_run_id: str):
 
         repo_full_name = repo["repo_full_name"]
         github_run_id = ci_run["github_run_id"]
+        commit_sha = ci_run.get("commit_sha") or ""
         commit_message = ci_run.get("commit_message") or ""
         workflow_name = ci_run.get("github_workflow_name") or "CI"
 
@@ -76,6 +77,14 @@ async def process_failure(ci_run_id: str):
             return
 
         # ── 4. Fetch source files for diagnosis context ──────────────────────
+        commit_diff = ""
+        if commit_sha:
+            commit_diff = await _fetch_commit_diff(
+                commit_sha=commit_sha,
+                repo_full_name=repo_full_name,
+                access_token=access_token,
+            )
+
         current_files = await _fetch_relevant_files(
             logs=logs,
             repo_full_name=repo_full_name,
@@ -92,6 +101,8 @@ async def process_failure(ci_run_id: str):
                 workflow_name=workflow_name,
                 iteration=1,
                 run_id=ci_run_id,
+                commit_sha=commit_sha,
+                commit_diff=commit_diff or None,
                 current_files=current_files or None,
             )
         except DiagnosisValidationError as e:
@@ -131,6 +142,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             return
 
         repo_full_name = repo["repo_full_name"]
+        commit_sha = ci_run.get("commit_sha") or ""
         commit_message = ci_run.get("commit_message") or ""
         workflow_name = ci_run.get("github_workflow_name") or "CI"
 
@@ -139,6 +151,13 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             return
 
         access_token_iter2 = _get_access_token(repo["user_id"])
+        commit_diff = ""
+        if access_token_iter2 and commit_sha:
+            commit_diff = await _fetch_commit_diff(
+                commit_sha=commit_sha,
+                repo_full_name=repo_full_name,
+                access_token=access_token_iter2,
+            )
         current_files_iter2 = {}
         if access_token_iter2:
             current_files_iter2 = await _fetch_relevant_files(
@@ -157,6 +176,8 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 iteration=2,
                 previous_diagnosis=previous_diagnosis,
                 run_id=ci_run_id,
+                commit_sha=commit_sha,
+                commit_diff=commit_diff or None,
                 current_files=current_files_iter2 or None,
             )
         except DiagnosisValidationError as e:
@@ -276,6 +297,36 @@ async def _fetch_relevant_files(
     if result:
         logger.info(f"Fetched {len(result)} source files for {repo_full_name}: {list(result.keys())}")
     return result
+
+
+async def _fetch_commit_diff(commit_sha: str, repo_full_name: str, access_token: str) -> str:
+    """Fetch the commit diff that likely introduced the failing change."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github.diff",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repo_full_name}/commits/{commit_sha}",
+                headers=headers,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to fetch commit diff for {repo_full_name}@{commit_sha[:7]}: {e}")
+        return ""
+
+    if resp.status_code != 200:
+        logger.warning(
+            f"Commit diff fetch returned {resp.status_code} for {repo_full_name}@{commit_sha[:7]}"
+        )
+        return ""
+
+    diff = resp.text[:8000]
+    if diff:
+        logger.info(f"Fetched commit diff for {repo_full_name}@{commit_sha[:7]} ({len(diff)} chars)")
+    return diff
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
