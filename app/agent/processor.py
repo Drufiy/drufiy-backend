@@ -15,7 +15,7 @@ from app.agent.log_fetcher import (
     LogsNotAvailableError,
     fetch_workflow_logs,
 )
-from app.agent.pr_creator import PRCreationError, create_fix_pr
+from app.agent.pr_creator import PRCreationError, apply_unified_patch, create_fix_pr
 from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
@@ -112,6 +112,12 @@ async def process_failure(ci_run_id: str):
                 commit_diff=commit_diff or None,
                 current_files=current_files or None,
                 similar_fixes=similar_fixes or None,
+            )
+            await _materialize_patch_file_changes(
+                diagnosis=diagnosis,
+                repo_full_name=repo_full_name,
+                access_token=access_token,
+                default_branch=repo.get("default_branch", "main"),
             )
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
@@ -225,6 +231,12 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 commit_diff=commit_diff or None,
                 current_files=current_files_iter2 or None,
                 similar_fixes=similar_fixes_iter2 or None,
+            )
+            await _materialize_patch_file_changes(
+                diagnosis=diagnosis,
+                repo_full_name=repo_full_name,
+                access_token=access_token_iter2,
+                default_branch=repo.get("default_branch", "main"),
             )
         except DiagnosisValidationError as e:
             logger.error(f"Iteration {next_iteration} diagnosis failed for run {ci_run_id}: {e}")
@@ -741,6 +753,16 @@ def _mark_rerun_resolved(ci_run_id: str, diagnosis_id: str | None):
 async def _sleep(seconds: int):
     import asyncio
     await asyncio.sleep(seconds)
+
+
+async def _materialize_patch_file_changes(diagnosis, repo_full_name: str, access_token: str, default_branch: str):
+    for file_change in diagnosis.files_changed:
+        if file_change.new_content or not file_change.patch:
+            continue
+        current_content = await _fetch_repo_file(repo_full_name, access_token, file_change.path, default_branch)
+        if current_content is None:
+            raise DiagnosisValidationError(f"Could not fetch {file_change.path} to apply patch")
+        file_change.new_content = apply_unified_patch(current_content, file_change.patch)
 
 
 def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:

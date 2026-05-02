@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 class FileChange(BaseModel):
     path: str = Field(..., description="File path relative to repo root")
-    new_content: str = Field(..., description="Complete new file content (not a diff)")
+    new_content: str | None = Field(default=None, description="Complete new file content")
+    patch: str | None = Field(default=None, description="Unified diff patch to apply to the current file")
     explanation: str = Field(..., description="What changed and why")
 
     @field_validator("path")
@@ -17,11 +18,30 @@ class FileChange(BaseModel):
     @field_validator("new_content")
     @classmethod
     def validate_content(cls, v):
+        if v is None:
+            return v
         if len(v) > 200_000:
             raise ValueError("new_content exceeds 200KB — likely hallucinated")
         if len(v.strip()) == 0:
             raise ValueError("new_content is empty")
         return v
+
+    @field_validator("patch")
+    @classmethod
+    def validate_patch(cls, v):
+        if v is None:
+            return v
+        if len(v) > 200_000:
+            raise ValueError("patch exceeds 200KB — likely hallucinated")
+        if len(v.strip()) == 0:
+            raise ValueError("patch is empty")
+        return v
+
+    @model_validator(mode="after")
+    def require_content_or_patch(self) -> "FileChange":
+        if not self.new_content and not self.patch:
+            raise ValueError("Either new_content or patch must be provided")
+        return self
 
 
 class Diagnosis(BaseModel):
