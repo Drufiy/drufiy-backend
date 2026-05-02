@@ -1,6 +1,7 @@
 import base64
 import logging
 import re
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -19,6 +20,7 @@ from app.config import settings
 from app.db import supabase
 
 logger = logging.getLogger(__name__)
+GITHUB_API = "https://api.github.com"
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
@@ -115,6 +117,38 @@ async def process_failure(ci_run_id: str):
         diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=1)
         _update_status(ci_run_id, "diagnosed")
         logger.info(f"Diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type} confidence={diagnosis.confidence}")
+
+        # ── 6.5. Flaky tests: rerun once, then auto-skip if still failing ────
+        if diagnosis.is_flaky_test:
+            logger.info(f"Flaky test detected for run {ci_run_id} — attempting automatic rerun")
+            rerun_requested = await _trigger_rerun(github_run_id, repo_full_name, access_token)
+            rerun_conclusion = None
+            if rerun_requested:
+                rerun_conclusion = await _wait_for_run_completion(
+                    github_run_id=github_run_id,
+                    repo_full_name=repo_full_name,
+                    access_token=access_token,
+                )
+                if rerun_conclusion == "success":
+                    _mark_rerun_resolved(ci_run_id, diagnosis_row.get("id"))
+                    logger.info(f"Flaky rerun passed for run {ci_run_id}")
+                    return
+
+            logger.info(
+                f"Flaky rerun did not resolve run {ci_run_id} "
+                f"(requested={rerun_requested}, conclusion={rerun_conclusion}) — creating skip PR"
+            )
+            skipped = await _auto_skip_test(
+                ci_run_id=ci_run_id,
+                repo_full_name=repo_full_name,
+                access_token=access_token,
+                default_branch=repo.get("default_branch", "main"),
+                diagnosis=diagnosis,
+                diagnosis_row=diagnosis_row,
+                logs=logs,
+            )
+            if skipped:
+                return
 
         # ── 7. Auto-apply if safe ────────────────────────────────────────────
         if diagnosis.fix_type == "safe_auto_apply" and not diagnosis.is_flaky_test:
@@ -409,6 +443,254 @@ async def _fetch_commit_diff(commit_sha: str, repo_full_name: str, access_token:
     if diff:
         logger.info(f"Fetched commit diff for {repo_full_name}@{commit_sha[:7]} ({len(diff)} chars)")
     return diff
+
+
+async def _trigger_rerun(github_run_id: int, repo_full_name: str, access_token: str) -> bool:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                f"{GITHUB_API}/repos/{repo_full_name}/actions/runs/{github_run_id}/rerun-failed-jobs",
+                headers=headers,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to trigger rerun for {repo_full_name} run {github_run_id}: {e}")
+        return False
+
+    if resp.status_code not in (201, 202, 204):
+        logger.warning(
+            f"Rerun request failed for {repo_full_name} run {github_run_id}: "
+            f"{resp.status_code} {resp.text[:200]}"
+        )
+        return False
+    return True
+
+
+async def _wait_for_run_completion(
+    github_run_id: int,
+    repo_full_name: str,
+    access_token: str,
+    timeout_seconds: int = 600,
+    poll_interval_seconds: int = 10,
+) -> str | None:
+    """Poll the rerun until it completes so we can auto-skip immediately if needed."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    deadline = time.monotonic() + timeout_seconds
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        while time.monotonic() < deadline:
+            try:
+                resp = await client.get(
+                    f"{GITHUB_API}/repos/{repo_full_name}/actions/runs/{github_run_id}",
+                    headers=headers,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to poll rerun status for {repo_full_name} run {github_run_id}: {e}")
+                await _sleep(poll_interval_seconds)
+                continue
+
+            if resp.status_code != 200:
+                logger.warning(
+                    f"Rerun status poll returned {resp.status_code} for "
+                    f"{repo_full_name} run {github_run_id}"
+                )
+                await _sleep(poll_interval_seconds)
+                continue
+
+            run = resp.json()
+            status = run.get("status")
+            conclusion = run.get("conclusion")
+            if status == "completed":
+                return conclusion
+
+            await _sleep(poll_interval_seconds)
+
+    logger.warning(f"Timed out waiting for rerun completion for {repo_full_name} run {github_run_id}")
+    return None
+
+
+async def _auto_skip_test(
+    ci_run_id: str,
+    repo_full_name: str,
+    access_token: str,
+    default_branch: str,
+    diagnosis,
+    diagnosis_row: dict,
+    logs: str,
+) -> bool:
+    """Create a PR that skips the flaky test after a rerun still fails."""
+    target = _infer_test_target(diagnosis.problem_summary, logs)
+    test_file = target.get("test_file")
+    test_name = target.get("test_name")
+    if not test_file:
+        logger.warning(f"Could not infer flaky test file for run {ci_run_id}")
+        return False
+
+    current_content = await _fetch_repo_file(repo_full_name, access_token, test_file, default_branch)
+    if current_content is None:
+        logger.warning(f"Could not fetch flaky test file {test_file} for run {ci_run_id}")
+        return False
+
+    new_content = _build_skipped_test_content(test_file, current_content, test_name)
+    if not new_content or new_content == current_content:
+        logger.warning(
+            f"Could not build skip patch for run {ci_run_id} "
+            f"(file={test_file}, test_name={test_name!r})"
+        )
+        return False
+
+    skip_diagnosis = {
+        "id": diagnosis_row.get("id") or f"skip-test-{ci_run_id}",
+        "fix_type": "safe_auto_apply",
+        "files_changed": [{
+            "path": test_file,
+            "new_content": new_content,
+            "explanation": (
+                f"Automatically skipped flaky test '{test_name or test_file}' after rerun still failed"
+            ),
+        }],
+    }
+
+    _update_status(ci_run_id, "applying")
+    try:
+        pr_result = await create_fix_pr(
+            repo_full_name=repo_full_name,
+            access_token=access_token,
+            run_id=ci_run_id,
+            diagnosis=skip_diagnosis,
+        )
+    except PRCreationError as e:
+        logger.error(f"Auto skip-test PR creation failed for run {ci_run_id}: {e}")
+        await _mark_failed(ci_run_id, "diagnosis_failed", f"Auto skip-test PR failed: {str(e)[:200]}")
+        return False
+
+    supabase.table("ci_runs").update({
+        "status": "fixed",
+        "fix_branch_name": pr_result["branch"],
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", ci_run_id).execute()
+
+    supabase.table("diagnoses").update({
+        "github_pr_url": pr_result["pr_url"],
+        "github_pr_number": pr_result["pr_number"],
+        "fix_description": f"{diagnosis.root_cause}\n\nAuto action: reran failed jobs, then opened a skip PR when rerun still failed.",
+    }).eq("id", diagnosis_row["id"]).execute()
+    logger.info(f"Auto skip-test PR created for run {ci_run_id}: {pr_result['pr_url']}")
+    return True
+
+
+def _infer_test_target(problem_summary: str, logs: str) -> dict[str, str | None]:
+    combined = f"{problem_summary}\n{logs}"
+
+    file_match = re.search(r"(tests?/[\w./-]+\.(?:py|ts|tsx|js|jsx))", combined)
+    test_file = file_match.group(1) if file_match else None
+
+    pytest_match = re.search(r"::([A-Za-z_][A-Za-z0-9_]*)", combined)
+    if pytest_match:
+        return {"test_file": test_file, "test_name": pytest_match.group(1)}
+
+    func_match = re.search(r"\b(test_[A-Za-z0-9_]+)\b", combined)
+    if func_match:
+        return {"test_file": test_file, "test_name": func_match.group(1)}
+
+    jest_match = re.search(r"●[^\n]*›\s*([^\n]+)", combined)
+    if jest_match:
+        return {"test_file": test_file, "test_name": jest_match.group(1).strip()}
+
+    return {"test_file": test_file, "test_name": None}
+
+
+async def _fetch_repo_file(
+    repo_full_name: str,
+    access_token: str,
+    path: str,
+    ref: str,
+) -> str | None:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{repo_full_name}/contents/{path}",
+                headers=headers,
+                params={"ref": ref},
+            )
+    except Exception as e:
+        logger.warning(f"Failed to fetch repo file {path} from {repo_full_name}: {e}")
+        return None
+
+    if resp.status_code != 200:
+        return None
+
+    data = resp.json()
+    if data.get("type") != "file" or not data.get("content"):
+        return None
+    return base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
+
+
+def _build_skipped_test_content(test_file: str, current_content: str, test_name: str | None) -> str | None:
+    is_pytest = test_file.endswith(".py")
+    is_jest = test_file.endswith((".ts", ".tsx", ".js", ".jsx"))
+    if is_pytest:
+        if test_name:
+            pattern = re.compile(rf"^([ \t]*)(async def|def)\s+({re.escape(test_name)})\s*\(", re.MULTILINE)
+            match = re.search(pattern, current_content)
+            if match:
+                indent = match.group(1)
+                insert_pos = match.start()
+                skip_line = f'{indent}@pytest.mark.skip(reason="Skipped by Drufiy - flaky or placeholder test")\n'
+                new_content = current_content[:insert_pos] + skip_line + current_content[insert_pos:]
+                if "import pytest" not in new_content:
+                    new_content = "import pytest\n" + new_content
+                return new_content
+
+        # Fallback: skip the whole pytest module when we know the file but not the exact test.
+        prefix = 'import pytest\npytestmark = pytest.mark.skip(reason="Skipped by Drufiy - flaky test module")\n'
+        if "pytestmark = pytest.mark.skip(" in current_content:
+            return None
+        if "import pytest" in current_content:
+            return f'pytestmark = pytest.mark.skip(reason="Skipped by Drufiy - flaky test module")\n{current_content}'
+        return prefix + current_content
+
+    if is_jest:
+        if test_name:
+            pattern = re.compile(rf"(test|it)\s*\(\s*['\"]({re.escape(test_name)})['\"]")
+            if re.search(pattern, current_content):
+                return re.sub(pattern, r"\1.skip('\2'", current_content)
+        fallback_pattern = re.compile(r"\b(test|it)\s*\(")
+        if re.search(fallback_pattern, current_content):
+            return re.sub(fallback_pattern, r"\1.skip(", current_content, count=1)
+
+    return None
+
+
+def _mark_rerun_resolved(ci_run_id: str, diagnosis_id: str | None):
+    supabase.table("ci_runs").update({
+        "status": "verified",
+        "error_message": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", ci_run_id).execute()
+    if diagnosis_id:
+        supabase.table("diagnoses").update({
+            "verification_status": "verified",
+            "fix_description": "Automatically resolved by rerunning failed jobs after flaky test diagnosis.",
+        }).eq("id", diagnosis_id).execute()
+
+
+async def _sleep(seconds: int):
+    import asyncio
+    await asyncio.sleep(seconds)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
