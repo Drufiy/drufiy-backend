@@ -1,5 +1,5 @@
 """
-Verification reconciler — sweeps ci_runs stuck in 'fixed' status and resolves them.
+Verification reconciler — sweeps ci_runs stuck in processing states and resolves them.
 
 Why this exists:
   GitHub sends workflow_run webhook events when fix-branch CI completes.
@@ -7,9 +7,10 @@ Why this exists:
   it, the branch-name query returns 0 results, and the run is never marked verified.
   No new webhook will come, so it stays spinning forever.
 
-  This reconciler runs every 60 seconds, finds every run stuck in 'fixed' for
-  >3 minutes, re-queries GitHub for the fix-branch CI outcome, and moves each
-  run to verified / iteration_2 / exhausted accordingly.
+  This reconciler runs every 60 seconds and heals runs stuck in:
+  - diagnosing: background task likely died mid-run
+  - applying: PR creation likely completed partially or the worker died
+  - fixed: verification webhook likely got missed
 """
 
 import logging
@@ -40,7 +41,7 @@ async def _get_decrypted_token(user_id: str) -> str | None:
 
 async def reconcile_stuck_verifications() -> int:
     """
-    Check all ci_runs stuck in 'fixed' status for >3 minutes.
+    Sweep ci_runs stuck in diagnosing/applying/fixed and recover them.
     Returns the number of runs resolved.
     """
     global _reconciling
@@ -51,26 +52,14 @@ async def reconcile_stuck_verifications() -> int:
 
     resolved = 0
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+        now = datetime.now(timezone.utc)
+        diagnosing_cutoff = (now - timedelta(minutes=5)).isoformat()
+        applying_cutoff = (now - timedelta(minutes=3)).isoformat()
+        fixed_cutoff = (now - timedelta(minutes=3)).isoformat()
 
-        stuck_result = (
-            supabase.table("ci_runs")
-            .select("*, connected_repos(*)")
-            .eq("status", "fixed")
-            .lt("updated_at", cutoff)
-            .not_.is_("fix_branch_name", "null")
-            .execute()
-        )
-        if not stuck_result.data:
-            return 0
-
-        logger.info(f"Reconciler: found {len(stuck_result.data)} run(s) stuck in 'fixed'")
-
-        for ci_run in stuck_result.data:
-            try:
-                resolved += await _reconcile_one(ci_run)
-            except Exception as e:
-                logger.warning(f"Reconciler: error on run {ci_run['id'][:8]}: {e}")
+        resolved += await _recover_stuck_diagnosing(diagnosing_cutoff)
+        resolved += await _recover_stuck_applying(applying_cutoff)
+        resolved += await _recover_stuck_fixed(fixed_cutoff)
 
     finally:
         _reconciling = False
@@ -199,6 +188,159 @@ async def _reconcile_one(ci_run: dict) -> int:
         from app.agent.processor import process_iteration_2
         await process_iteration_2(ci_run_id, new_logs, previous_diagnosis)
         return 1
+
+
+async def _recover_stuck_diagnosing(cutoff: str) -> int:
+    stuck_result = (
+        supabase.table("ci_runs")
+        .select("id")
+        .eq("status", "diagnosing")
+        .lt("updated_at", cutoff)
+        .execute()
+    )
+    stuck_runs = stuck_result.data or []
+    if not stuck_runs:
+        return 0
+
+    logger.info(f"Reconciler: found {len(stuck_runs)} run(s) stuck in 'diagnosing'")
+    resolved = 0
+    from app.agent.processor import process_failure
+
+    for run in stuck_runs:
+        ci_run_id = run["id"]
+        try:
+            supabase.table("ci_runs").update({
+                "status": "pending",
+                "error_message": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", ci_run_id).execute()
+            await process_failure(ci_run_id)
+            resolved += 1
+        except Exception as e:
+            logger.warning(f"Reconciler: failed to requeue diagnosing run {ci_run_id[:8]}: {e}")
+    return resolved
+
+
+async def _recover_stuck_applying(cutoff: str) -> int:
+    stuck_result = (
+        supabase.table("ci_runs")
+        .select("*, connected_repos(*)")
+        .eq("status", "applying")
+        .lt("updated_at", cutoff)
+        .execute()
+    )
+    stuck_runs = stuck_result.data or []
+    if not stuck_runs:
+        return 0
+
+    logger.info(f"Reconciler: found {len(stuck_runs)} run(s) stuck in 'applying'")
+    resolved = 0
+    for ci_run in stuck_runs:
+        try:
+            resolved += await _recover_one_applying(ci_run)
+        except Exception as e:
+            logger.warning(f"Reconciler: error recovering applying run {ci_run['id'][:8]}: {e}")
+    return resolved
+
+
+async def _recover_stuck_fixed(cutoff: str) -> int:
+    stuck_result = (
+        supabase.table("ci_runs")
+        .select("*, connected_repos(*)")
+        .eq("status", "fixed")
+        .lt("updated_at", cutoff)
+        .not_.is_("fix_branch_name", "null")
+        .execute()
+    )
+    stuck_runs = stuck_result.data or []
+    if not stuck_runs:
+        return 0
+
+    logger.info(f"Reconciler: found {len(stuck_runs)} run(s) stuck in 'fixed'")
+    resolved = 0
+    for ci_run in stuck_runs:
+        try:
+            resolved += await _reconcile_one(ci_run)
+        except Exception as e:
+            logger.warning(f"Reconciler: error on fixed run {ci_run['id'][:8]}: {e}")
+    return resolved
+
+
+async def _recover_one_applying(ci_run: dict) -> int:
+    ci_run_id = ci_run["id"]
+    repo = ci_run.get("connected_repos") or {}
+    repo_full_name = repo.get("repo_full_name", "")
+    user_id = repo.get("user_id", "")
+    if not repo_full_name or not user_id:
+        return 0
+
+    access_token = await _get_decrypted_token(user_id)
+    if not access_token:
+        return 0
+
+    pr = await _find_existing_fix_pr(ci_run_id, repo_full_name, access_token)
+    now = datetime.now(timezone.utc).isoformat()
+    if not pr:
+        logger.warning(f"Reconciler: applying run {ci_run_id[:8]} has no PR on GitHub")
+        supabase.table("ci_runs").update({
+            "status": "diagnosis_failed",
+            "error_message": "Applying stalled and no PR was found on GitHub",
+            "updated_at": now,
+        }).eq("id", ci_run_id).execute()
+        return 1
+
+    supabase.table("ci_runs").update({
+        "status": "fixed",
+        "fix_branch_name": pr["head"]["ref"],
+        "updated_at": now,
+    }).eq("id", ci_run_id).execute()
+
+    latest_diag = (
+        supabase.table("diagnoses")
+        .select("id")
+        .eq("run_id", ci_run_id)
+        .order("iteration", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if latest_diag.data:
+        supabase.table("diagnoses").update({
+            "github_pr_url": pr["html_url"],
+            "github_pr_number": pr["number"],
+        }).eq("id", latest_diag.data[0]["id"]).execute()
+
+    ci_run["fix_branch_name"] = pr["head"]["ref"]
+    return await _reconcile_one(ci_run)
+
+
+async def _find_existing_fix_pr(ci_run_id: str, repo_full_name: str, access_token: str) -> dict | None:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    branch_prefix = f"drufiy/fix-run-{ci_run_id[:8]}"
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repo_full_name}/pulls",
+                headers=headers,
+                params={"state": "open", "per_page": 50},
+            )
+    except Exception as e:
+        logger.warning(f"Reconciler: failed to list PRs for {repo_full_name}: {e}")
+        return None
+
+    if resp.status_code != 200:
+        logger.warning(f"Reconciler: pull request lookup returned {resp.status_code} for {repo_full_name}")
+        return None
+
+    for pr in resp.json():
+        head_ref = ((pr.get("head") or {}).get("ref")) or ""
+        if head_ref.startswith(branch_prefix):
+            return pr
+    return None
 
 
 def _update_known_good_files(ci_run: dict, repo_id: str):
