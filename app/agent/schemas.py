@@ -55,6 +55,10 @@ class Diagnosis(BaseModel):
     category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "unknown"]
     logs_truncated_warning: bool = Field(default=False)
     speculative: bool = Field(default=False, description="True when confidence is low but a best-guess PR is still created for review")
+    required_secrets: list[str] = Field(
+        default_factory=list,
+        description="Exact names of missing secrets/env vars that must be added to fix this failure (e.g. STRIPE_KEY, DATABASE_URL). Only populated when category='environment'.",
+    )
 
     @model_validator(mode="after")
     def coerce_fix_type(self) -> "Diagnosis":

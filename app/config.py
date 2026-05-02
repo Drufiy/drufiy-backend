@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     public_backend_url: str = "http://localhost:8000"
 
+    # Slack (optional — internal ops alerts, not user-facing)
+    slack_webhook_url: str | None = None
+
     # Email (Resend — optional, used for weekly health reports)
     resend_api_key: str | None = None
     report_email_from: str = "Drufiy <reports@drufiy.com>"

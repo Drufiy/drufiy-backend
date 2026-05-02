@@ -95,6 +95,18 @@ DIAGNOSIS_TOOL = {
                 "type": "boolean",
                 "description": "True if log ends mid-stack-trace or only shows setup with no error line.",
             },
+            "required_secrets": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "ONLY populate when category='environment'. "
+                    "List the EXACT names of every missing secret or env var from the logs "
+                    "(e.g. ['STRIPE_SECRET_KEY', 'DATABASE_URL']). "
+                    "For common safe defaults (CI=true, NODE_ENV=test, PORT=3000) — "
+                    "add them directly to the workflow YAML in files_changed instead. "
+                    "Leave empty [] for all other categories."
+                ),
+            },
             "files_changed": {
                 "type": "array",
                 "description": (
@@ -182,6 +194,18 @@ These patterns are always auto-fixable. Never return manual_required for them:
 • Missing step in workflow (e.g., `pip install` missing before pytest) → add the step.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ENVIRONMENT FAILURES — REQUIRED_SECRETS EXTRACTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When category=environment (missing secret / env var):
+1. Extract EVERY secret name from the logs into required_secrets (e.g. ["STRIPE_KEY", "DATABASE_URL"])
+2. For common safe defaults, add them to the workflow YAML instead (no user action needed):
+   - NODE_ENV=test, CI=true, PORT=3000, RAILS_ENV=test → add as `env:` in .github/workflows/*.yml
+3. For real secrets (API keys, DB passwords) → required_secrets only, files_changed stays []
+4. fix_description should tell the user exactly where to add each secret
+   (GitHub → Settings → Secrets and variables → Actions → New repository secret)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIXES YOU MUST NOT ATTEMPT (return manual_required, files_changed=[])
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -189,6 +213,7 @@ FIXES YOU MUST NOT ATTEMPT (return manual_required, files_changed=[])
 • Database migrations — schema changes require human validation.
 • Fixes that touch >5 files — too broad, surface for manual review.
 • Missing environment secrets (STRIPE_KEY, API_KEY, etc.) — cannot be fixed in code.
+  → But DO populate required_secrets so the UI can show a 1-click "Add Secret" form.
 • Anything requiring access to external services or credentials.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

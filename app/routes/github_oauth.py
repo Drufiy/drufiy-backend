@@ -9,6 +9,7 @@ from app.auth import create_access_token, get_current_user
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_installation_token, github_app_enabled, list_installation_repos
+from app.notifier import notify_new_signup
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -96,6 +97,11 @@ async def github_callback(body: OAuthCallbackRequest):
 
     user_row = result.data[0]
     user_id = user_row["id"]
+    is_new_user = user_row.get("created_at") == user_row.get("updated_at")
+
+    # Slack alert on first signup
+    if is_new_user:
+        await notify_new_signup(login)
 
     # Encrypt and store the GitHub access token
     try:

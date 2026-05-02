@@ -89,7 +89,7 @@ def history(
 
     diags = (
         supabase.table("diagnoses")
-        .select("run_id, iteration, problem_summary, fix_type, confidence, category, github_pr_url, github_pr_number, verification_status, created_at")
+        .select("run_id, iteration, problem_summary, fix_type, confidence, category, github_pr_url, github_pr_number, verification_status, required_secrets, speculative, created_at")
         .in_("run_id", run_ids)
         .order("iteration", desc=True)
         .execute()

@@ -12,6 +12,7 @@ from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_repo_access_token
+from app.notifier import notify_verified
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -159,6 +160,11 @@ async def handle_verification_event(payload: dict):
 
             # Update known_good_files
             _update_known_good_files(ci_run, repo["id"])
+
+            # Slack: notify team that a fix was verified
+            if diag.data:
+                pr_url = diag.data[0].get("github_pr_url") or ""
+                await notify_verified(ci_run_id, repo_full_name, pr_url)
 
             # Auto-merge: when the repo owner has enabled it and CI is green, merge the PR
             if repo.get("auto_merge") and diag.data:

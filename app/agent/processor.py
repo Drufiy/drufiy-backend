@@ -21,6 +21,7 @@ from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_repo_access_token
+from app.notifier import notify_deepseek_fallback, notify_diagnosis_failed, notify_exhausted
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
@@ -1018,6 +1019,7 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
         "logs_truncated_warning": diagnosis.logs_truncated_warning,
         "speculative": diagnosis.speculative,
         "files_changed": [fc.model_dump() for fc in diagnosis.files_changed],
+        "required_secrets": diagnosis.required_secrets,
     }
     result = supabase.table("diagnoses").insert(row).execute()
     return result.data[0] if result.data else row
@@ -1094,6 +1096,14 @@ def _update_status(ci_run_id: str, status: str):
 
 async def _mark_failed(ci_run_id: str, status: str, message: str):
     try:
+        # Fetch repo name for Slack alerts before writing status
+        repo_name = ""
+        try:
+            run_row = supabase.table("ci_runs").select("connected_repos(repo_full_name)").eq("id", ci_run_id).single().execute()
+            repo_name = ((run_row.data or {}).get("connected_repos") or {}).get("repo_full_name", "")
+        except Exception:
+            pass
+
         supabase.table("ci_runs").update({
             "status": status,
             "error_message": message,
@@ -1101,5 +1111,11 @@ async def _mark_failed(ci_run_id: str, status: str, message: str):
         }).eq("id", ci_run_id).execute()
         if status in ("verified", "exhausted", "diagnosis_failed"):
             mark_agent_run_outcome(ci_run_id, status)
+
+        # Slack alerts for terminal failure states
+        if status == "exhausted":
+            await notify_exhausted(ci_run_id, repo_name)
+        elif status == "diagnosis_failed":
+            await notify_diagnosis_failed(ci_run_id, repo_name, message)
     except Exception as e:
         logger.error(f"Failed to mark run {ci_run_id} as {status}: {e}")
