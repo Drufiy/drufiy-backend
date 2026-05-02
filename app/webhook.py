@@ -148,7 +148,7 @@ async def handle_verification_event(payload: dict):
             # Update latest diagnosis
             diag = (
                 supabase.table("diagnoses")
-                .select("id")
+                .select("id, github_pr_number")
                 .eq("run_id", ci_run_id)
                 .order("iteration", desc=True)
                 .limit(1)
@@ -159,6 +159,17 @@ async def handle_verification_event(payload: dict):
 
             # Update known_good_files
             _update_known_good_files(ci_run, repo["id"])
+
+            # Auto-merge: when the repo owner has enabled it and CI is green, merge the PR
+            if repo.get("auto_merge") and diag.data:
+                pr_number = diag.data[0].get("github_pr_number")
+                if pr_number:
+                    await _auto_merge_pr(
+                        repo_full_name=repo_full_name,
+                        pr_number=pr_number,
+                        access_token=access_token,
+                        ci_run_id=ci_run_id,
+                    )
 
         else:
             prev_diag_result = (
@@ -234,6 +245,60 @@ def _update_known_good_files(ci_run: dict, repo_id: str):
             ).execute()
     except Exception as e:
         logger.warning(f"Failed to update known_good_files: {e}")
+
+
+async def _auto_merge_pr(
+    repo_full_name: str,
+    pr_number: int,
+    access_token: str,
+    ci_run_id: str,
+) -> None:
+    """
+    Merge the Drufiy fix PR via GitHub API (squash merge).
+    Called only when repo.auto_merge=True and all CI checks pass.
+    Best-effort — never raises; logs warnings on failure.
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.put(
+                f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/merge",
+                headers=headers,
+                json={
+                    "merge_method": "squash",
+                    "commit_title": f"fix: Drufiy auto-fix (PR #{pr_number})",
+                    "commit_message": (
+                        "Automatically merged by Drufiy after all CI checks passed.\n\n"
+                        f"CI run: {ci_run_id}"
+                    ),
+                },
+            )
+
+        if resp.status_code == 200:
+            logger.info(f"Auto-merged PR #{pr_number} for ci_run {ci_run_id}")
+            supabase.table("ci_runs").update({
+                "status": "merged",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", ci_run_id).execute()
+        elif resp.status_code == 405:
+            logger.warning(
+                f"Auto-merge failed for PR #{pr_number} — PR not mergeable "
+                f"(branch protection or conflicts): {resp.text[:200]}"
+            )
+        elif resp.status_code == 409:
+            logger.warning(
+                f"Auto-merge skipped for PR #{pr_number} — already merged or SHA conflict"
+            )
+        else:
+            logger.warning(
+                f"Auto-merge returned {resp.status_code} for PR #{pr_number}: {resp.text[:200]}"
+            )
+    except Exception as e:
+        logger.warning(f"Auto-merge exception for PR #{pr_number} ci_run {ci_run_id}: {e}")
 
 
 # ── Main webhook endpoint ─────────────────────────────────────────────────────
