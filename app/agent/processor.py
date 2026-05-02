@@ -1,3 +1,4 @@
+import json
 import asyncio
 import base64
 import logging
@@ -8,7 +9,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app.agent.diagnosis_agent import diagnose_failure
-from app.agent.kimi_client import DiagnosisValidationError, mark_agent_run_outcome
+from app.agent.kimi_client import DiagnosisValidationError, call_with_tool, mark_agent_run_outcome
 from app.agent.log_fetcher import (
     InsufficientPermissionsError,
     LogFetchError,
@@ -22,6 +23,18 @@ from app.db import supabase
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
+SANITY_REVIEW_TOOL = {
+    "name": "submit_review",
+    "description": "Approve or reject a proposed CI fix after reviewing it for correctness and safety.",
+    "parameters": {
+        "type": "object",
+        "required": ["approve", "reason"],
+        "properties": {
+            "approve": {"type": "boolean"},
+            "reason": {"type": "string"},
+        },
+    },
+}
 
 
 # ── Public entry points ───────────────────────────────────────────────────────
@@ -755,6 +768,44 @@ async def _sleep(seconds: int):
     await asyncio.sleep(seconds)
 
 
+async def _sanity_check_fix(ci_run_id: str, diagnosis) -> tuple[bool, str]:
+    if not settings.deepseek_api_key:
+        return True, "DeepSeek sanity review skipped because no deepseek_api_key is configured."
+
+    review_prompt = f"""
+Review this proposed CI fix before it is auto-applied.
+
+Problem summary:
+{diagnosis.problem_summary}
+
+Root cause:
+{diagnosis.root_cause}
+
+Fix description:
+{diagnosis.fix_description}
+
+Proposed file changes:
+{json.dumps([fc.model_dump() for fc in diagnosis.files_changed], indent=2)}
+
+Approve only if the fix correctly addresses the root cause, preserves unrelated code,
+and is unlikely to introduce a new breakage.
+"""
+    try:
+        review = await call_with_tool(
+            system_prompt="You are a strict CI fix reviewer. Reject any risky or incomplete auto-apply.",
+            user_prompt=review_prompt,
+            tool_schema=SANITY_REVIEW_TOOL,
+            run_id=ci_run_id,
+            call_type="sanity_review",
+            model="deepseek",
+        )
+    except Exception as e:
+        logger.warning(f"DeepSeek sanity review failed for run {ci_run_id}: {e}")
+        return True, f"DeepSeek sanity review failed open: {e}"
+
+    return bool(review.get("approve")), review.get("reason", "")
+
+
 async def _materialize_patch_file_changes(diagnosis, repo_full_name: str, access_token: str, default_branch: str):
     for file_change in diagnosis.files_changed:
         if file_change.new_content or not file_change.patch:
@@ -964,6 +1015,19 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
 async def _apply_fix(ci_run_id: str, repo_full_name: str, access_token: str, repo_id: str, diagnosis_row: dict, diagnosis):
     """Create the fix PR and update ci_run + diagnoses tables."""
     _update_status(ci_run_id, "applying")
+
+    approved, review_reason = await _sanity_check_fix(ci_run_id, diagnosis)
+    if not approved:
+        logger.warning(f"DeepSeek sanity review rejected auto-apply for run {ci_run_id}: {review_reason}")
+        supabase.table("ci_runs").update({
+            "status": "diagnosed",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", ci_run_id).execute()
+        supabase.table("diagnoses").update({
+            "fix_type": "review_recommended",
+            "fix_description": f"{diagnosis.fix_description}\n\nDeepSeek review: {review_reason}",
+        }).eq("id", diagnosis_row["id"]).execute()
+        return
 
     # Diff-risk check before applying (guardrail against hallucinated rewrites)
     for file_change in diagnosis.files_changed:
