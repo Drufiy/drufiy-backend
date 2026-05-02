@@ -421,6 +421,7 @@ async def diagnose_failure(
     commit_diff: str | None = None,
     current_files: dict[str, str] | None = None,   # {path: content} fetched from GitHub
     force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
+    model: str = "auto",
 ) -> Diagnosis:
     """
     Run Kimi K2.6 diagnosis on CI logs. Returns a validated Diagnosis object.
@@ -464,6 +465,7 @@ async def diagnose_failure(
         tool_schema=DIAGNOSIS_TOOL,
         run_id=run_id,
         call_type=call_type,
+        model=model,
     )
 
     try:

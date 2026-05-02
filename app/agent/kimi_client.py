@@ -294,11 +294,33 @@ async def call_with_tool(
     run_id: str | None = None,
     call_type: str = "diagnosis",
     temperature: float = 0.6,   # 0.6 required when thinking disabled on kimi-k2.6
+    model: str = "auto",
 ) -> dict:
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+    if model == "deepseek":
+        if not deepseek:
+            raise DiagnosisValidationError("DeepSeek model requested but deepseek_api_key is not configured.")
+        args, raw, usage = await _call_openai_compatible_fallback(
+            deepseek, settings.deepseek_model, messages, tool_schema, "DeepSeek"
+        )
+        _log_agent_call(
+            run_id,
+            call_type,
+            settings.deepseek_model,
+            messages,
+            raw,
+            args,
+            usage,
+            valid=(args is not None),
+            error="DeepSeek returned no tool call" if args is None else None,
+        )
+        if args is not None:
+            return args
+        raise DiagnosisValidationError("DeepSeek returned no valid tool call.")
 
     # Attempt 1: Kimi K2.6
     args, raw, usage = await _call_kimi(messages, tool_schema)
@@ -314,6 +336,10 @@ async def call_with_tool(
                     valid=(args is not None), error="No tool call after retry" if args is None else None)
     if args is not None:
         return args
+
+    if model == "kimi":
+        raise DiagnosisValidationError("Kimi returned no valid tool call after 2 attempts.")
+
     logger.warning("Kimi attempt 2: still no valid tool call — trying DeepSeek fallback")
 
     # Attempt 3: DeepSeek fallback

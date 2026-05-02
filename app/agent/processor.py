@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import logging
 import re
@@ -97,7 +98,7 @@ async def process_failure(ci_run_id: str):
 
         # ── 5. Diagnose ──────────────────────────────────────────────────────
         try:
-            diagnosis = await diagnose_failure(
+            diagnosis = await _diagnose_with_parallel_models(
                 logs=logs,
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
@@ -204,7 +205,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             )
 
         try:
-            diagnosis = await diagnose_failure(
+            diagnosis = await _diagnose_with_parallel_models(
                 logs=new_logs,
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
@@ -691,6 +692,48 @@ def _mark_rerun_resolved(ci_run_id: str, diagnosis_id: str | None):
 async def _sleep(seconds: int):
     import asyncio
     await asyncio.sleep(seconds)
+
+
+async def _diagnose_with_parallel_models(**kwargs):
+    """
+    Run Kimi and DeepSeek in parallel and take the first valid diagnosis.
+    Falls back cleanly if DeepSeek is not configured.
+    """
+    kimi_task = asyncio.create_task(diagnose_failure(model="kimi", **kwargs))
+    tasks = {kimi_task}
+
+    deepseek_enabled = bool(settings.deepseek_api_key)
+    if deepseek_enabled:
+        tasks.add(asyncio.create_task(diagnose_failure(model="deepseek", **kwargs)))
+
+    errors: list[str] = []
+    try:
+        while tasks:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                try:
+                    result = task.result()
+                except DiagnosisValidationError as e:
+                    errors.append(str(e))
+                    tasks.remove(task)
+                    continue
+                except Exception as e:
+                    errors.append(str(e))
+                    tasks.remove(task)
+                    continue
+
+                for other in pending:
+                    other.cancel()
+                return result
+
+            tasks = pending
+    finally:
+        for task in tasks:
+            task.cancel()
+
+    if errors:
+        raise DiagnosisValidationError(" | ".join(errors[:2]))
+    raise DiagnosisValidationError("No model returned a valid diagnosis.")
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
