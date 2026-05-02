@@ -96,6 +96,9 @@ async def process_failure(ci_run_id: str):
             workflow_name=workflow_name,
         )
 
+        # RAG: fetch past verified fixes for this repo as few-shot context
+        similar_fixes = _fetch_similar_fixes(repo["id"])
+
         # ── 5. Diagnose ──────────────────────────────────────────────────────
         try:
             diagnosis = await _diagnose_with_parallel_models(
@@ -108,6 +111,7 @@ async def process_failure(ci_run_id: str):
                 commit_sha=commit_sha,
                 commit_diff=commit_diff or None,
                 current_files=current_files or None,
+                similar_fixes=similar_fixes or None,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
@@ -205,6 +209,9 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 workflow_name=workflow_name,
             )
 
+        # RAG: inject past verified fixes — especially useful on retry iterations
+        similar_fixes_iter2 = _fetch_similar_fixes(repo["id"])
+
         try:
             diagnosis = await _diagnose_with_parallel_models(
                 logs=new_logs,
@@ -217,6 +224,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 commit_sha=commit_sha,
                 commit_diff=commit_diff or None,
                 current_files=current_files_iter2 or None,
+                similar_fixes=similar_fixes_iter2 or None,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Iteration {next_iteration} diagnosis failed for run {ci_run_id}: {e}")
@@ -732,6 +740,42 @@ def _mark_rerun_resolved(ci_run_id: str, diagnosis_id: str | None):
 async def _sleep(seconds: int):
     import asyncio
     await asyncio.sleep(seconds)
+
+
+def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:
+    """
+    Return the most recent verified fixes for this repo as RAG context.
+    Best-effort — returns [] on any error.
+    """
+    try:
+        # Step 1: collect all ci_run IDs for this repo
+        runs_resp = (
+            supabase.table("ci_runs")
+            .select("id")
+            .eq("connected_repo_id", repo_id)
+            .execute()
+        )
+        run_ids = [r["id"] for r in (runs_resp.data or [])]
+        if not run_ids:
+            return []
+
+        # Step 2: most recent verified diagnoses that produced a file fix
+        diag_resp = (
+            supabase.table("diagnoses")
+            .select("problem_summary, root_cause, fix_description, category, confidence, files_changed")
+            .in_("run_id", run_ids)
+            .eq("verification_status", "verified")
+            .neq("fix_type", "manual_required")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        fixes = diag_resp.data or []
+        logger.info(f"RAG: fetched {len(fixes)} verified fixes for repo_id={repo_id}")
+        return fixes
+    except Exception as e:
+        logger.warning(f"RAG fetch failed for repo_id={repo_id}: {e}")
+        return []
 
 
 async def _diagnose_with_parallel_models(**kwargs):

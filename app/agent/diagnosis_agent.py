@@ -422,6 +422,7 @@ async def diagnose_failure(
     current_files: dict[str, str] | None = None,   # {path: content} fetched from GitHub
     force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
     model: str = "auto",
+    similar_fixes: list[dict] | None = None,        # Past verified fixes for this repo (RAG context)
 ) -> Diagnosis:
     """
     Run Kimi K2.6 diagnosis on CI logs. Returns a validated Diagnosis object.
@@ -443,6 +444,7 @@ async def diagnose_failure(
     user_prompt = _build_user_prompt(
         preprocessed, repo_full_name, commit_message,
         workflow_name, iteration, previous_diagnosis, current_files, commit_sha, commit_diff,
+        similar_fixes=similar_fixes,
     )
 
     # Force-fix: user has explicitly authorized — append strong override instruction
@@ -517,6 +519,7 @@ def _build_user_prompt(
     current_files: dict[str, str] | None,
     commit_sha: str | None,
     commit_diff: str | None,
+    similar_fixes: list[dict] | None = None,
 ) -> str:
     parts = [
         f"REPOSITORY: {repo_full_name}",
@@ -526,6 +529,30 @@ def _build_user_prompt(
 
     if commit_sha:
         parts.append(f"COMMIT SHA: {commit_sha}")
+
+    # RAG: inject past verified fixes for this repo as few-shot context
+    if similar_fixes:
+        rag_lines = [
+            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "PAST VERIFIED FIXES FOR THIS REPO (use these as reference — same patterns may apply)",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for i, fix in enumerate(similar_fixes, 1):
+            files_summary = ", ".join(
+                f["path"] for f in (fix.get("files_changed") or [])
+            ) or "none"
+            rag_lines.append(
+                f"\nVerified Fix #{i} [{fix.get('category', '?')}] "
+                f"(confidence {int((fix.get('confidence') or 0) * 100)}%)"
+            )
+            rag_lines.append(f"Problem: {fix.get('problem_summary', '')}")
+            rag_lines.append(f"Root cause: {fix.get('root_cause', '')[:300]}")
+            rag_lines.append(f"Fix: {fix.get('fix_description', '')[:300]}")
+            rag_lines.append(f"Files changed: {files_summary}")
+        rag_lines.append(
+            "\nIf the current failure matches one of the above patterns, apply the same fix approach."
+        )
+        parts.append("\n".join(rag_lines))
 
     # Inject current file contents so Kimi can write complete replacements
     if current_files:
