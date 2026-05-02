@@ -265,6 +265,30 @@ async def _call_openai_compatible_fallback(
     return None, prose, usage
 
 
+async def _call_kimi_with_tools(messages: list, tools: list[dict]):
+    """Single Kimi call with multiple investigation tools enabled."""
+    start = time.time()
+    try:
+        response = await kimi.chat.completions.create(
+            model=settings.kimi_model,
+            messages=messages,
+            tools=[{"type": "function", "function": tool} for tool in tools],
+            max_tokens=4000,
+            temperature=0.2,
+            extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
+        )
+    except Exception as e:
+        err_str = str(e)
+        if any(code in err_str for code in ["402", "429", "503", "insufficient"]):
+            logger.warning(f"Kimi investigation call recoverable error: {err_str[:200]}")
+            return None, "", {"latency_ms": int((time.time() - start) * 1000)}
+        raise
+
+    latency_ms = int((time.time() - start) * 1000)
+    msg = response.choices[0].message
+    return msg, json.dumps(msg.model_dump(), default=str), _usage_from_response(response, latency_ms)
+
+
 def _log_agent_call(run_id, call_type, model, messages, raw, parsed, usage, valid, error=None):
     try:
         supabase.table("agent_calls").insert({
@@ -319,6 +343,106 @@ def mark_agent_run_outcome(run_id: str | None, outcome: str):
         supabase.table("agent_calls").update({"diagnosis_outcome": outcome}).eq("run_id", run_id).execute()
     except Exception as e:
         logger.error(f"Failed to mark agent call outcome for run {run_id}: {e}")
+
+
+async def call_with_investigation(
+    system_prompt: str,
+    user_prompt: str,
+    diagnosis_tool_schema: dict,
+    investigation_tools: list[dict],
+    execute_tool,
+    run_id: str | None = None,
+    call_type: str = "diagnosis",
+) -> dict:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    all_tools = investigation_tools + [diagnosis_tool_schema]
+
+    for step in range(3):
+        message, raw, usage = await _call_kimi_with_tools(messages, all_tools)
+        parsed = None
+        valid = False
+        error = None
+
+        if not message or not message.tool_calls:
+            error = "Kimi investigation step returned no tool call"
+        else:
+            tool_call = message.tool_calls[0]
+            tool_name = tool_call.function.name
+            try:
+                tool_args = json.loads(tool_call.function.arguments or "{}")
+            except json.JSONDecodeError:
+                tool_args = {}
+                error = "Kimi investigation step returned invalid tool arguments"
+
+            if tool_name == diagnosis_tool_schema["name"] and error is None:
+                parsed = tool_args
+                valid = True
+                _log_agent_call(
+                    run_id,
+                    f"{call_type}_investigation_step_{step + 1}",
+                    settings.kimi_model,
+                    messages,
+                    raw,
+                    parsed,
+                    usage,
+                    valid=True,
+                )
+                return parsed
+
+            if error is None:
+                tool_result = await execute_tool(tool_name, tool_args)
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": [{
+                        "id": tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": tool_call.function.arguments,
+                        },
+                    }],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result,
+                })
+                parsed = {"tool_name": tool_name, "tool_args": tool_args}
+                valid = True
+
+        _log_agent_call(
+            run_id,
+            f"{call_type}_investigation_step_{step + 1}",
+            settings.kimi_model,
+            messages,
+            raw,
+            parsed,
+            usage,
+            valid=valid,
+            error=error,
+        )
+
+    final_prompt = "You have completed your investigation steps. Now submit your structured diagnosis using the tool."
+    final_messages = messages + [{"role": "user", "content": final_prompt}]
+    args, raw, usage = await _call_kimi_structured(final_messages, diagnosis_tool_schema)
+    _log_agent_call(
+        run_id,
+        f"{call_type}_investigation_final",
+        settings.kimi_model,
+        final_messages,
+        raw,
+        args,
+        usage,
+        valid=(args is not None),
+        error="No tool call in forced final diagnosis" if args is None else None,
+    )
+    if args is None:
+        raise DiagnosisValidationError("Kimi investigation loop did not yield a final diagnosis.")
+    return args
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

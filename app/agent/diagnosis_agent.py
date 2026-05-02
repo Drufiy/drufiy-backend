@@ -1,10 +1,13 @@
 import json
 import logging
 import re
+import base64
+
+import httpx
 
 from pydantic import ValidationError
 
-from app.agent.kimi_client import DiagnosisValidationError, call_with_tool
+from app.agent.kimi_client import DiagnosisValidationError, call_with_investigation, call_with_tool
 from app.agent.schemas import Diagnosis
 
 logger = logging.getLogger(__name__)
@@ -433,6 +436,7 @@ async def diagnose_failure(
     force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
     model: str = "auto",
     similar_fixes: list[dict] | None = None,        # Past verified fixes for this repo (RAG context)
+    investigation_context: dict | None = None,
 ) -> Diagnosis:
     """
     Run Kimi K2.6 diagnosis on CI logs. Returns a validated Diagnosis object.
@@ -471,14 +475,25 @@ async def diagnose_failure(
     if force_fix:
         call_type = "force_fix_diagnosis"
 
-    raw_args = await call_with_tool(
-        system_prompt=SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-        tool_schema=DIAGNOSIS_TOOL,
-        run_id=run_id,
-        call_type=call_type,
-        model=model,
-    )
+    if model == "kimi" and investigation_context:
+        raw_args = await call_with_investigation(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            diagnosis_tool_schema=DIAGNOSIS_TOOL,
+            investigation_tools=INVESTIGATION_TOOLS,
+            execute_tool=lambda name, args: _execute_investigation_tool(name, args, investigation_context),
+            run_id=run_id,
+            call_type=call_type,
+        )
+    else:
+        raw_args = await call_with_tool(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            tool_schema=DIAGNOSIS_TOOL,
+            run_id=run_id,
+            call_type=call_type,
+            model=model,
+        )
 
     try:
         diagnosis = Diagnosis(**raw_args)
@@ -517,6 +532,109 @@ async def diagnose_failure(
         diagnosis = diagnosis.model_copy(update=updates)
 
     return diagnosis
+
+
+INVESTIGATION_TOOLS = [
+    {
+        "name": "fetch_file",
+        "description": "Fetch the current content of a file from the repo.",
+        "parameters": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}},
+        },
+    },
+    {
+        "name": "list_directory",
+        "description": "List files in a directory.",
+        "parameters": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}},
+        },
+    },
+    {
+        "name": "search_code",
+        "description": "Search for a function, class, or symbol in the repository.",
+        "parameters": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {"query": {"type": "string"}},
+        },
+    },
+]
+
+
+async def _execute_investigation_tool(tool_name: str, tool_args: dict, context: dict) -> str:
+    if tool_name == "fetch_file":
+        return await _investigation_fetch_file(context, tool_args.get("path", ""))
+    if tool_name == "list_directory":
+        return await _investigation_list_directory(context, tool_args.get("path", ""))
+    if tool_name == "search_code":
+        return await _investigation_search_code(context, tool_args.get("query", ""))
+    return json.dumps({"error": f"Unknown investigation tool: {tool_name}"})
+
+
+async def _investigation_fetch_file(context: dict, path: str) -> str:
+    if not path:
+        return json.dumps({"error": "path is required"})
+    headers = _gh_headers(context["access_token"])
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"https://api.github.com/repos/{context['repo_full_name']}/contents/{path}",
+            headers=headers,
+            params={"ref": context["default_branch"]},
+        )
+    if resp.status_code != 200:
+        return json.dumps({"error": f"fetch_file failed with {resp.status_code}", "path": path})
+    data = resp.json()
+    content = base64.b64decode(data["content"].replace("\n", "")).decode("utf-8", errors="replace")
+    return json.dumps({"path": path, "content": content[:20000]})
+
+
+async def _investigation_list_directory(context: dict, path: str) -> str:
+    headers = _gh_headers(context["access_token"])
+    target = path.strip("/") if path else ""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"https://api.github.com/repos/{context['repo_full_name']}/contents/{target}",
+            headers=headers,
+            params={"ref": context["default_branch"]},
+        )
+    if resp.status_code != 200:
+        return json.dumps({"error": f"list_directory failed with {resp.status_code}", "path": target})
+    entries = [
+        {"path": item.get("path"), "type": item.get("type")}
+        for item in (resp.json() if isinstance(resp.json(), list) else [])
+    ]
+    return json.dumps({"path": target or ".", "entries": entries[:200]})
+
+
+async def _investigation_search_code(context: dict, query: str) -> str:
+    if not query:
+        return json.dumps({"error": "query is required"})
+    headers = _gh_headers(context["access_token"])
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            "https://api.github.com/search/code",
+            headers=headers,
+            params={"q": f"{query} repo:{context['repo_full_name']}", "per_page": 10},
+        )
+    if resp.status_code != 200:
+        return json.dumps({"error": f"search_code failed with {resp.status_code}", "query": query})
+    items = [
+        {"path": item.get("path"), "name": item.get("name")}
+        for item in resp.json().get("items", [])
+    ]
+    return json.dumps({"query": query, "matches": items})
+
+
+def _gh_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
 
 
 def _build_user_prompt(

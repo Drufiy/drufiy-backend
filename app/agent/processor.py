@@ -125,6 +125,11 @@ async def process_failure(ci_run_id: str):
                 commit_diff=commit_diff or None,
                 current_files=current_files or None,
                 similar_fixes=similar_fixes or None,
+                investigation_context={
+                    "repo_full_name": repo_full_name,
+                    "access_token": access_token,
+                    "default_branch": repo.get("default_branch", "main"),
+                },
             )
             await _materialize_patch_file_changes(
                 diagnosis=diagnosis,
@@ -244,6 +249,11 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 commit_diff=commit_diff or None,
                 current_files=current_files_iter2 or None,
                 similar_fixes=similar_fixes_iter2 or None,
+                investigation_context={
+                    "repo_full_name": repo_full_name,
+                    "access_token": access_token_iter2,
+                    "default_branch": repo.get("default_branch", "main"),
+                },
             )
             await _materialize_patch_file_changes(
                 diagnosis=diagnosis,
