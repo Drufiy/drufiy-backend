@@ -279,10 +279,46 @@ def _log_agent_call(run_id, call_type, model, messages, raw, parsed, usage, vali
             "input_tokens": usage.get("input_tokens"),
             "output_tokens": usage.get("output_tokens"),
             "latency_ms": usage.get("latency_ms"),
+            "estimated_cost_usd": _estimate_cost_usd(model, usage),
         }).execute()
     except Exception as e:
         logger.error(f"Failed to log agent call: {e}")
         # Never propagate — logging must not break the pipeline
+
+
+def _estimate_cost_usd(model: str, usage: dict) -> float | None:
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if input_tokens is None and output_tokens is None:
+        return None
+
+    if model == settings.kimi_model:
+        input_rate = settings.kimi_input_price_per_1m_tokens
+        output_rate = settings.kimi_output_price_per_1m_tokens
+    elif model == settings.deepseek_model:
+        input_rate = settings.deepseek_input_price_per_1m_tokens
+        output_rate = settings.deepseek_output_price_per_1m_tokens
+    else:
+        return None
+
+    if input_rate is None and output_rate is None:
+        return None
+
+    estimated = 0.0
+    if input_tokens is not None and input_rate is not None:
+        estimated += (input_tokens / 1_000_000) * input_rate
+    if output_tokens is not None and output_rate is not None:
+        estimated += (output_tokens / 1_000_000) * output_rate
+    return round(estimated, 6)
+
+
+def mark_agent_run_outcome(run_id: str | None, outcome: str):
+    if not run_id:
+        return
+    try:
+        supabase.table("agent_calls").update({"diagnosis_outcome": outcome}).eq("run_id", run_id).execute()
+    except Exception as e:
+        logger.error(f"Failed to mark agent call outcome for run {run_id}: {e}")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

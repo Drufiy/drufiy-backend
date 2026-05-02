@@ -125,6 +125,8 @@ CREATE TABLE IF NOT EXISTS public.agent_calls (
   input_tokens INT,
   output_tokens INT,
   latency_ms INT,
+  estimated_cost_usd DOUBLE PRECISION,
+  diagnosis_outcome TEXT CHECK (diagnosis_outcome IN ('verified', 'exhausted', 'diagnosis_failed') OR diagnosis_outcome IS NULL),
   created_at TIMESTAMPTZ DEFAULT now()
 );
 

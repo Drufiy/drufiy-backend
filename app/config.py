@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-coder"
+    kimi_input_price_per_1m_tokens: float | None = None
+    kimi_output_price_per_1m_tokens: float | None = None
+    deepseek_input_price_per_1m_tokens: float | None = None
+    deepseek_output_price_per_1m_tokens: float | None = None
 
     # GitHub
     github_client_id: str

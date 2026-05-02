@@ -18,6 +18,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
+from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
 
@@ -126,6 +127,7 @@ async def _reconcile_one(ci_run: dict) -> int:
             "status": "verified",
             "updated_at": now,
         }).eq("id", ci_run_id).execute()
+        mark_agent_run_outcome(ci_run_id, "verified")
 
         # Update diagnosis verification_status
         diag = (
@@ -163,6 +165,7 @@ async def _reconcile_one(ci_run: dict) -> int:
                 "error_message": "Fix branch CI failed after 4 iterations — manual intervention required",
                 "updated_at": now,
             }).eq("id", ci_run_id).execute()
+            mark_agent_run_outcome(ci_run_id, "exhausted")
             return 1
 
         next_iteration = max_iteration + 1

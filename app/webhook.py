@@ -8,6 +8,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
 
@@ -142,6 +143,7 @@ async def handle_verification_event(payload: dict):
                 "status": "verified",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", ci_run_id).execute()
+            mark_agent_run_outcome(ci_run_id, "verified")
 
             # Update latest diagnosis
             diag = (
@@ -176,6 +178,7 @@ async def handle_verification_event(payload: dict):
                     "error_message": "Fix branch CI failed after 4 iterations — manual intervention required",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }).eq("id", ci_run_id).execute()
+                mark_agent_run_outcome(ci_run_id, "exhausted")
                 return
 
             next_iteration = max_iteration + 1

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import httpx
 
 from app.agent.diagnosis_agent import diagnose_failure
-from app.agent.kimi_client import DiagnosisValidationError
+from app.agent.kimi_client import DiagnosisValidationError, mark_agent_run_outcome
 from app.agent.log_fetcher import (
     InsufficientPermissionsError,
     LogFetchError,
@@ -730,6 +730,7 @@ def _mark_rerun_resolved(ci_run_id: str, diagnosis_id: str | None):
         "error_message": None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", ci_run_id).execute()
+    mark_agent_run_outcome(ci_run_id, "verified")
     if diagnosis_id:
         supabase.table("diagnoses").update({
             "verification_status": "verified",
@@ -1001,5 +1002,7 @@ async def _mark_failed(ci_run_id: str, status: str, message: str):
             "error_message": message,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", ci_run_id).execute()
+        if status in ("verified", "exhausted", "diagnosis_failed"):
+            mark_agent_run_outcome(ci_run_id, status)
     except Exception as e:
         logger.error(f"Failed to mark run {ci_run_id} as {status}: {e}")
