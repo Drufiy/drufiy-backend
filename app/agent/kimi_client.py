@@ -65,10 +65,73 @@ def _extract_json_from_prose(text: str) -> dict | None:
     return None
 
 
-async def _call_kimi(messages: list, tool_schema: dict):
+def _usage_from_response(response, latency_ms: int) -> dict:
+    return {
+        "input_tokens": response.usage.prompt_tokens if response.usage else None,
+        "output_tokens": response.usage.completion_tokens if response.usage else None,
+        "latency_ms": latency_ms,
+    }
+
+
+def _merge_usage(*usages: dict) -> dict:
+    input_tokens = 0
+    output_tokens = 0
+    total_latency = 0
+    saw_input = False
+    saw_output = False
+
+    for usage in usages:
+        if not usage:
+            continue
+        if usage.get("input_tokens") is not None:
+            input_tokens += usage["input_tokens"]
+            saw_input = True
+        if usage.get("output_tokens") is not None:
+            output_tokens += usage["output_tokens"]
+            saw_output = True
+        total_latency += usage.get("latency_ms") or 0
+
+    return {
+        "input_tokens": input_tokens if saw_input else None,
+        "output_tokens": output_tokens if saw_output else None,
+        "latency_ms": total_latency,
+    }
+
+
+async def _call_kimi_reasoning(messages: list):
+    """
+    First Kimi call: allow thinking and free-form analysis before forcing a tool call.
+    Returns (reasoning_text_or_none, raw_content, usage_info).
+    """
+    start = time.time()
+    try:
+        response = await kimi.chat.completions.create(
+            model=settings.kimi_model,
+            messages=messages,
+            max_tokens=4000,
+            temperature=0.2,
+            extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
+        )
+    except Exception as e:
+        err_str = str(e)
+        if any(code in err_str for code in ["402", "429", "503", "insufficient"]):
+            logger.warning(
+                f"Kimi reasoning call recoverable error ({e.__class__.__name__}): "
+                f"{err_str[:200]} — will try fallback"
+            )
+            return None, "", {"latency_ms": int((time.time() - start) * 1000)}
+        raise
+
+    latency_ms = int((time.time() - start) * 1000)
+    msg = response.choices[0].message
+    reasoning = msg.content or ""
+    return reasoning, reasoning, _usage_from_response(response, latency_ms)
+
+
+async def _call_kimi_structured(messages: list, tool_schema: dict):
     """
     Returns (parsed_args_or_none, raw_content, usage_info).
-    Handles 402 (credit exhausted) gracefully — returns None so Claude fallback fires.
+    Handles 402 (credit exhausted) gracefully — returns None so DeepSeek fallback fires.
 
     Note: kimi-k2.6 with thinking disabled requires exactly temperature=0.6.
     Extended thinking is disabled because it is incompatible with forced tool_choice.
@@ -93,11 +156,7 @@ async def _call_kimi(messages: list, tool_schema: dict):
         raise
 
     latency_ms = int((time.time() - start) * 1000)
-    usage = {
-        "input_tokens": response.usage.prompt_tokens if response.usage else None,
-        "output_tokens": response.usage.completion_tokens if response.usage else None,
-        "latency_ms": latency_ms,
-    }
+    usage = _usage_from_response(response, latency_ms)
 
     msg = response.choices[0].message
 
@@ -121,6 +180,34 @@ async def _call_kimi(messages: list, tool_schema: dict):
         return extracted, prose, usage
 
     return None, prose, usage
+
+
+async def _call_kimi(messages: list, tool_schema: dict):
+    """
+    Two-step Kimi flow:
+    1. Run a reasoning pass with thinking enabled.
+    2. Feed that analysis back into a forced tool call with thinking disabled.
+    """
+    reasoning, reasoning_raw, reasoning_usage = await _call_kimi_reasoning(messages)
+    if not reasoning:
+        return None, reasoning_raw, reasoning_usage
+
+    structured_messages = [
+        *messages,
+        {"role": "assistant", "content": f"My analysis:\n{reasoning}"},
+        {
+            "role": "user",
+            "content": "Now submit your structured diagnosis using the tool. Follow the system instructions exactly.",
+        },
+    ]
+    args, structured_raw, structured_usage = await _call_kimi_structured(structured_messages, tool_schema)
+    combined_raw = json.dumps(
+        {
+            "reasoning": reasoning_raw,
+            "structured_response": structured_raw,
+        }
+    )
+    return args, combined_raw, _merge_usage(reasoning_usage, structured_usage)
 
 
 async def _call_openai_compatible_fallback(
