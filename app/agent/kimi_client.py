@@ -18,23 +18,13 @@ kimi = AsyncOpenAI(
     timeout=120.0,
 )
 
-nvidia = (
+deepseek = (
     AsyncOpenAI(
-        api_key=settings.nvidia_api_key,
-        base_url=settings.nvidia_base_url,
+        api_key=settings.deepseek_api_key,
+        base_url=settings.deepseek_base_url,
         timeout=90.0,
     )
-    if settings.nvidia_api_key
-    else None
-)
-
-gemini = (
-    AsyncOpenAI(
-        api_key=settings.gemini_api_key,
-        base_url=settings.gemini_base_url,
-        timeout=90.0,
-    )
-    if settings.gemini_api_key
+    if settings.deepseek_api_key
     else None
 )
 
@@ -141,7 +131,7 @@ async def _call_openai_compatible_fallback(
     label: str,
 ) -> tuple:
     """
-    Generic fallback for any OpenAI-compatible endpoint (NVIDIA NIM, Gemini, etc.).
+    Generic fallback for any OpenAI-compatible endpoint.
     Returns (parsed_args_or_none, raw_content, usage_info).
     """
     if not client:
@@ -237,32 +227,20 @@ async def call_with_tool(
                     valid=(args is not None), error="No tool call after retry" if args is None else None)
     if args is not None:
         return args
-    logger.warning("Kimi attempt 2: still no valid tool call — trying NVIDIA NIM fallback")
+    logger.warning("Kimi attempt 2: still no valid tool call — trying DeepSeek fallback")
 
-    # Attempt 3: NVIDIA NIM (meta/llama-3.3-70b-instruct)
-    if nvidia:
+    # Attempt 3: DeepSeek fallback
+    if deepseek:
         args, raw, usage = await _call_openai_compatible_fallback(
-            nvidia, settings.nvidia_model, messages, tool_schema, "NVIDIA NIM"
+            deepseek, settings.deepseek_model, messages, tool_schema, "DeepSeek"
         )
-        _log_agent_call(run_id, call_type, settings.nvidia_model, messages, raw, args, usage,
-                        valid=(args is not None), error="NVIDIA NIM returned no tool call" if args is None else None)
+        _log_agent_call(run_id, call_type, settings.deepseek_model, messages, raw, args, usage,
+                        valid=(args is not None), error="DeepSeek returned no tool call" if args is None else None)
         if args is not None:
-            logger.info("NVIDIA NIM fallback succeeded")
-            return args
-        logger.warning("NVIDIA NIM fallback: no valid tool call — trying Gemini fallback")
-
-    # Attempt 4: Gemini 2.0 Flash
-    if gemini:
-        args, raw, usage = await _call_openai_compatible_fallback(
-            gemini, settings.gemini_model, messages, tool_schema, "Gemini"
-        )
-        _log_agent_call(run_id, call_type, settings.gemini_model, messages, raw, args, usage,
-                        valid=(args is not None), error="Gemini also returned no tool call" if args is None else None)
-        if args is not None:
-            logger.info("Gemini fallback succeeded")
+            logger.info("DeepSeek fallback succeeded")
             return args
 
     raise DiagnosisValidationError(
-        "All 4 model attempts (Kimi x2 + NVIDIA NIM + Gemini) returned no valid tool call. "
+        "All 3 model attempts (Kimi x2 + DeepSeek) returned no valid tool call. "
         "Check agent_calls table for raw responses."
     )
