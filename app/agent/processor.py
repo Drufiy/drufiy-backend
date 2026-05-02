@@ -90,6 +90,7 @@ async def process_failure(ci_run_id: str):
             repo_full_name=repo_full_name,
             access_token=access_token,
             default_branch=repo.get("default_branch", "main"),
+            workflow_name=workflow_name,
         )
 
         # ── 5. Diagnose ──────────────────────────────────────────────────────
@@ -165,6 +166,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 repo_full_name=repo_full_name,
                 access_token=access_token_iter2,
                 default_branch=repo.get("default_branch", "main"),
+                workflow_name=workflow_name,
             )
 
         try:
@@ -230,6 +232,7 @@ _FILE_PATH_RE = re.compile(
 _MANIFEST_FILES = [
     "package.json", "requirements.txt", "pyproject.toml",
     "Cargo.toml", "go.mod", "pom.xml", "Gemfile",
+    "tsconfig.json", "jest.config.js", "jest.config.ts",
 ]
 
 
@@ -238,7 +241,8 @@ async def _fetch_relevant_files(
     repo_full_name: str,
     access_token: str,
     default_branch: str,
-    max_files: int = 6,
+    workflow_name: str | None = None,
+    max_files: int = 12,
     max_file_bytes: int = 20_000,
 ) -> dict[str, str]:
     """
@@ -266,8 +270,16 @@ async def _fetch_relevant_files(
         if ext in _SOURCE_EXTENSIONS and path not in candidates:
             candidates.append(path)
 
-    # Prepend manifests so they're always included if slots remain
-    paths_to_fetch = _MANIFEST_FILES + [p for p in candidates if p not in _MANIFEST_FILES]
+    workflow_files = await _find_workflow_files(
+        repo_full_name=repo_full_name,
+        access_token=access_token,
+        default_branch=default_branch,
+        workflow_name=workflow_name,
+    )
+
+    # Prepend workflows and manifests so they're always included if slots remain
+    priority_paths = workflow_files + _MANIFEST_FILES
+    paths_to_fetch = priority_paths + [p for p in candidates if p not in priority_paths]
     paths_to_fetch = paths_to_fetch[:max_files]
 
     result: dict[str, str] = {}
@@ -297,6 +309,76 @@ async def _fetch_relevant_files(
     if result:
         logger.info(f"Fetched {len(result)} source files for {repo_full_name}: {list(result.keys())}")
     return result
+
+
+async def _find_workflow_files(
+    repo_full_name: str,
+    access_token: str,
+    default_branch: str,
+    workflow_name: str | None,
+) -> list[str]:
+    """Best-effort lookup for the workflow file(s) most likely tied to this run."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"https://api.github.com/repos/{repo_full_name}/contents/.github/workflows",
+                headers=headers,
+                params={"ref": default_branch},
+            )
+    except Exception as e:
+        logger.warning(f"Failed to list workflow files for {repo_full_name}: {e}")
+        return _workflow_name_candidates(workflow_name)
+
+    if resp.status_code != 200:
+        logger.warning(f"Workflow directory lookup returned {resp.status_code} for {repo_full_name}")
+        return _workflow_name_candidates(workflow_name)
+
+    items = resp.json()
+    workflow_paths = [
+        item["path"] for item in items
+        if item.get("type") == "file" and item.get("path", "").endswith((".yml", ".yaml"))
+    ]
+    if not workflow_paths:
+        return _workflow_name_candidates(workflow_name)
+
+    if not workflow_name:
+        return workflow_paths[:2]
+
+    workflow_slug = _slugify_workflow_name(workflow_name)
+    matched = []
+    for path in workflow_paths:
+        filename = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if _slugify_workflow_name(filename) == workflow_slug:
+            matched.append(path)
+
+    if matched:
+        return matched
+
+    guessed = _workflow_name_candidates(workflow_name)
+    return guessed + [path for path in workflow_paths if path not in guessed][:1]
+
+
+def _workflow_name_candidates(workflow_name: str | None) -> list[str]:
+    if not workflow_name:
+        return []
+    slug = _slugify_workflow_name(workflow_name)
+    if not slug:
+        return []
+    return [
+        f".github/workflows/{slug}.yml",
+        f".github/workflows/{slug}.yaml",
+    ]
+
+
+def _slugify_workflow_name(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug
 
 
 async def _fetch_commit_diff(commit_sha: str, repo_full_name: str, access_token: str) -> str:
