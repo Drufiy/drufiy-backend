@@ -270,6 +270,7 @@ _MANIFEST_FILES = [
     "Cargo.toml", "go.mod", "pom.xml", "Gemfile",
     "tsconfig.json", "jest.config.js", "jest.config.ts",
 ]
+_PYTHON_IMPORT_RE = re.compile(r"^(?:from|import)\s+([\w.]+)", re.MULTILINE)
 
 
 async def _fetch_relevant_files(
@@ -316,12 +317,14 @@ async def _fetch_relevant_files(
     # Prepend workflows and manifests so they're always included if slots remain
     priority_paths = workflow_files + _MANIFEST_FILES
     paths_to_fetch = priority_paths + [p for p in candidates if p not in priority_paths]
-    paths_to_fetch = paths_to_fetch[:max_files]
 
     result: dict[str, str] = {}
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for path in paths_to_fetch:
+            while paths_to_fetch and len(result) < max_files:
+                path = paths_to_fetch.pop(0)
+                if path in result:
+                    continue
                 try:
                     resp = await client.get(
                         f"https://api.github.com/repos/{repo_full_name}/contents/{path}",
@@ -337,6 +340,7 @@ async def _fetch_relevant_files(
                     if len(content) > max_file_bytes:
                         content = content[:max_file_bytes] + f"\n... [truncated at {max_file_bytes} chars] ..."
                     result[path] = content
+                    _queue_python_imports(path, content, paths_to_fetch, result, max_files)
                 except Exception:
                     continue
     except Exception as e:
@@ -415,6 +419,41 @@ def _workflow_name_candidates(workflow_name: str | None) -> list[str]:
 def _slugify_workflow_name(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
     return slug
+
+
+def _queue_python_imports(
+    fetched_path: str,
+    content: str,
+    paths_to_fetch: list[str],
+    result: dict[str, str],
+    max_files: int,
+):
+    """Follow simple Python import chains for fetched source files."""
+    if not fetched_path.endswith(".py") or len(result) >= max_files:
+        return
+
+    base_dir = fetched_path.rsplit("/", 1)[0] if "/" in fetched_path else ""
+    for match in _PYTHON_IMPORT_RE.finditer(content):
+        module = match.group(1)
+        module_path = module.replace(".", "/")
+        candidates = []
+        if module.startswith("."):
+            relative = module.lstrip(".").replace(".", "/")
+            if relative:
+                candidates.append(f"{base_dir}/{relative}.py")
+                candidates.append(f"{base_dir}/{relative}/__init__.py")
+        else:
+            candidates.extend([
+                f"{module_path}.py",
+                f"{module_path}/__init__.py",
+                f"src/{module_path}.py",
+                f"src/{module_path}/__init__.py",
+            ])
+
+        for candidate in candidates:
+            normalized = candidate.lstrip("./")
+            if normalized not in result and normalized not in paths_to_fetch:
+                paths_to_fetch.append(normalized)
 
 
 async def _fetch_commit_diff(commit_sha: str, repo_full_name: str, access_token: str) -> str:
