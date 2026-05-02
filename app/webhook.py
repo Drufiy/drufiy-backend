@@ -325,6 +325,25 @@ async def github_webhook(
         return JSONResponse(status_code=400, content={"error": "invalid_json"})
 
     if x_github_event != "workflow_run":
+        if x_github_event == "push":
+            repo_full_name = payload["repository"]["full_name"]
+            repo_result = (
+                supabase.table("connected_repos")
+                .select("*")
+                .eq("repo_full_name", repo_full_name)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if not repo_result.data:
+                return {"status": "repo_not_connected"}
+            repo = repo_result.data[0]
+            if not _check_rate_limit(repo["id"]):
+                logger.warning(f"Rate limit hit for push event repo {repo_full_name}")
+                return {"status": "rate_limited"}
+            from app.agent.push_handler import handle_push_event
+            background_tasks.add_task(handle_push_event, payload)
+            return {"status": "push_preflight_queued"}
         return {"status": "ignored", "event": x_github_event}
 
     action = payload.get("action")

@@ -125,7 +125,7 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
             json={
                 "name": "web",
                 "active": True,
-                "events": ["workflow_run"],
+                "events": ["workflow_run", "push"],
                 "config": {
                     "url": webhook_url,
                     "content_type": "json",
