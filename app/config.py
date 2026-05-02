@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     github_client_id: str
     github_client_secret: str
     github_webhook_secret: str
+    github_app_id: str | None = None
+    github_app_slug: str | None = None
+    github_app_private_key: str | None = None
 
     # JWT
     jwt_secret: str

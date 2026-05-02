@@ -20,6 +20,7 @@ from app.agent.pr_creator import PRCreationError, apply_unified_patch, create_fi
 from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
+from app.github_app import get_repo_access_token
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
@@ -67,7 +68,7 @@ async def process_failure(ci_run_id: str):
         workflow_name = ci_run.get("github_workflow_name") or "CI"
 
         # ── 2. Decrypt GitHub token ──────────────────────────────────────────
-        access_token = _get_access_token(repo["user_id"])
+        access_token = await get_repo_access_token(repo)
         if not access_token:
             await _mark_failed(ci_run_id, "diagnosis_failed", "Could not retrieve GitHub access token — user may need to re-authenticate")
             return
@@ -215,7 +216,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             await _mark_failed(ci_run_id, "exhausted", f"Iteration {next_iteration} had no logs to diagnose")
             return
 
-        access_token_iter2 = _get_access_token(repo["user_id"])
+        access_token_iter2 = await get_repo_access_token(repo)
         commit_diff = ""
         if access_token_iter2 and commit_sha:
             commit_diff = await _fetch_commit_diff(
@@ -276,7 +277,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             and not diagnosis.is_flaky_test
             and diagnosis.confidence >= 0.9
         ):
-            access_token = _get_access_token(repo["user_id"])
+            access_token = await get_repo_access_token(repo)
             if access_token:
                 await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
 

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.auth import create_access_token, get_current_user
 from app.config import settings
 from app.db import supabase
+from app.github_app import get_installation_token, github_app_enabled, list_installation_repos
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -165,3 +166,54 @@ async def check_scopes(current_user: dict = Depends(get_current_user)):
 @router.post("/logout")
 async def logout():
     return {"success": True}
+
+
+@router.get("/github-app/install-url")
+async def github_app_install_url():
+    if not github_app_enabled() or not settings.github_app_slug:
+        raise HTTPException(status_code=503, detail="GitHub App is not configured")
+    return {
+        "install_url": f"https://github.com/apps/{settings.github_app_slug}/installations/new"
+    }
+
+
+@router.get("/github-app/callback")
+async def github_app_callback(
+    installation_id: int,
+    setup_action: str | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    if not github_app_enabled():
+        raise HTTPException(status_code=503, detail="GitHub App is not configured")
+
+    try:
+        installation_token = await get_installation_token(installation_id)
+        repos = await list_installation_repos(installation_token)
+    except Exception as e:
+        logger.warning(f"GitHub App callback failed for installation {installation_id}: {e}")
+        raise HTTPException(status_code=502, detail="Failed to fetch installation repositories")
+
+    supabase.table("app_installations").upsert(
+        {
+            "user_id": current_user["id"],
+            "installation_id": installation_id,
+            "account_login": (repos[0].get("owner") or {}).get("login") if repos else None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="installation_id",
+    ).execute()
+
+    return {
+        "installation_id": installation_id,
+        "setup_action": setup_action,
+        "repositories": [
+            {
+                "id": repo["id"],
+                "name": repo["name"],
+                "full_name": repo["full_name"],
+                "default_branch": repo.get("default_branch"),
+                "installation_id": installation_id,
+            }
+            for repo in repos
+        ],
+    }

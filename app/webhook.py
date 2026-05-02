@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
+from app.github_app import get_repo_access_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -100,11 +101,10 @@ async def handle_verification_event(payload: dict):
     # NOTE: query by branch only — the fix branch has a different commit SHA
     # than the original failing commit, so filtering by head_sha returns 0 results.
     try:
-        token_result = supabase.rpc(
-            "get_decrypted_token",
-            {"p_user_id": repo["user_id"], "p_key": settings.jwt_secret},
-        ).execute()
-        access_token = token_result.data
+        access_token = await get_repo_access_token(repo)
+        if not access_token:
+            logger.warning(f"No access token available for verification run {ci_run_id}")
+            return
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(

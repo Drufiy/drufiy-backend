@@ -273,6 +273,70 @@ def get_run(run_id: str, current_user: dict = Depends(get_current_user)):
     }
 
 
+# ── GET /runs/{run_id}/logs ─────────────────────────────────────────────────
+
+@router.get("/{run_id}/logs")
+async def get_run_logs(run_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Fetch CI logs for a run via backend proxy.
+    Uses stored logs_url and backend GitHub auth.
+    """
+    ci_run = _get_run_with_ownership(run_id, current_user["id"])
+
+    logs_url = ci_run.get("logs_url")
+    if not logs_url:
+        raise HTTPException(status_code=404, detail={"error": "logs_not_available", "message": "No logs URL stored for this run"})
+
+    token = current_user.get("github_access_token")
+    if not token:
+        raise HTTPException(status_code=401, detail={"error": "no_token", "message": "GitHub access token not available"})
+
+    headers = _gh_headers(token)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # GitHub logs_url redirects to a zip download
+        resp = await client.get(logs_url, headers=headers, follow_redirects=True)
+
+        if resp.status_code == 410:
+            raise HTTPException(status_code=410, detail={"error": "logs_expired", "message": "CI logs have expired (GitHub retains logs for ~90 days)"})
+        if resp.status_code == 404:
+            raise HTTPException(status_code=404, detail={"error": "logs_not_found", "message": "Logs not found on GitHub"})
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail={"error": "github_error", "message": f"Failed to fetch logs: {resp.status_code}"})
+
+        content_type = resp.headers.get("content-type", "")
+
+        # GitHub returns logs as a zip file
+        if "zip" in content_type or resp.content[:4] == b"PK\x03\x04":
+            import zipfile
+            import io
+
+            try:
+                with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+                    # Extract and concatenate all .txt files (job logs)
+                    log_parts = []
+                    for name in sorted(zf.namelist()):
+                        if name.endswith(".txt"):
+                            try:
+                                content = zf.read(name).decode("utf-8", errors="replace")
+                                log_parts.append(f"=== {name} ===\n{content}")
+                            except Exception:
+                                pass
+                    logs_text = "\n\n".join(log_parts) if log_parts else "(No log files found in archive)"
+            except zipfile.BadZipFile:
+                logs_text = resp.content.decode("utf-8", errors="replace")
+        else:
+            # Plain text response
+            logs_text = resp.content.decode("utf-8", errors="replace")
+
+    # Strip ANSI escape codes for clean display
+    import re
+    ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    clean_logs = ansi_escape.sub("", logs_text)
+
+    return {"logs": clean_logs}
+
+
 # ── POST /runs/{run_id}/apply-fix ────────────────────────────────────────────
 
 @router.post("/{run_id}/apply-fix")

@@ -11,6 +11,7 @@ from app.agent.pr_creator import create_fix_pr
 from app.agent.processor import _fetch_commit_diff, _materialize_patch_file_changes
 from app.config import settings
 from app.db import supabase
+from app.github_app import get_repo_access_token
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
@@ -30,7 +31,7 @@ async def handle_push_event(payload: dict):
         return
 
     repo = repo_result.data[0]
-    access_token = _get_access_token(repo["user_id"])
+    access_token = await get_repo_access_token(repo)
     if not access_token:
         return
 
@@ -185,15 +186,3 @@ def _store_push_diagnosis(ci_run_id: str, diagnosis) -> dict:
     }
     result = supabase.table("diagnoses").insert(row).execute()
     return result.data[0] if result.data else row
-
-
-def _get_access_token(user_id: str) -> str | None:
-    try:
-        result = supabase.rpc(
-            "get_decrypted_token",
-            {"p_user_id": user_id, "p_key": settings.jwt_secret},
-        ).execute()
-        return result.data or None
-    except Exception as e:
-        logger.warning(f"Push handler token decrypt failed for user {user_id}: {e}")
-        return None

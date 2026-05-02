@@ -21,6 +21,7 @@ import httpx
 from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
+from app.github_app import get_repo_access_token
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,7 @@ async def _reconcile_one(ci_run: dict) -> int:
         logger.warning(f"Reconciler: run {ci_run_id[:8]} missing fix_branch or repo — skipping")
         return 0
 
-    access_token = await _get_decrypted_token(repo.get("user_id", ""))
+    access_token = await get_repo_access_token(repo)
     if not access_token:
         logger.warning(f"Reconciler: no token for run {ci_run_id[:8]} — skipping")
         return 0
@@ -276,7 +277,7 @@ async def _recover_one_applying(ci_run: dict) -> int:
     if not repo_full_name or not user_id:
         return 0
 
-    access_token = await _get_decrypted_token(user_id)
+    access_token = await get_repo_access_token(repo)
     if not access_token:
         return 0
 
