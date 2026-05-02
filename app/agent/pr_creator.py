@@ -37,6 +37,9 @@ async def create_fix_pr(
         ref_info = await _get(client, f"{GITHUB_API}/repos/{repo_full_name}/git/refs/heads/{default_branch}")
         base_sha = ref_info["object"]["sha"]
 
+        # Fetch commit blame — who broke it?
+        blame_info = await _fetch_blame(client, repo_full_name, base_sha)
+
         branch_name = await _create_branch(client, repo_full_name, run_id, base_sha)
 
         for file_change in (diagnosis.get("files_changed") or []):
@@ -47,7 +50,7 @@ async def create_fix_pr(
             f"{GITHUB_API}/repos/{repo_full_name}/pulls",
             {
                 "title": _pr_title(diagnosis),
-                "body": _pr_body(diagnosis, branch_name),
+                "body": _pr_body(diagnosis, branch_name, blame_info),
                 "head": branch_name,
                 "base": default_branch,
                 "maintainer_can_modify": True,
@@ -59,6 +62,34 @@ async def create_fix_pr(
         "pr_number": pr["number"],
         "branch": branch_name,
     }
+
+
+async def _fetch_blame(client, repo_full_name: str, commit_sha: str) -> dict | None:
+    """
+    Fetch the commit that is at HEAD of the default branch (the one that broke CI).
+    Returns author info for the PR body. Best-effort — never raises.
+    """
+    try:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{repo_full_name}/commits/{commit_sha}",
+            headers={**client.headers, "Accept": "application/vnd.github+json"},
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        commit = data.get("commit", {})
+        author = commit.get("author", {})
+        gh_author = data.get("author") or {}
+        return {
+            "sha": commit_sha[:7],
+            "message": (commit.get("message") or "").split("\n")[0][:80],
+            "author_name": author.get("name") or gh_author.get("login") or "unknown",
+            "author_login": gh_author.get("login"),
+            "date": (author.get("date") or "")[:10],
+        }
+    except Exception as e:
+        logger.warning(f"Could not fetch blame info for {repo_full_name}@{commit_sha[:7]}: {e}")
+        return None
 
 
 async def _create_branch(client, repo_full_name, run_id, base_sha) -> str:
@@ -132,17 +163,36 @@ def _raise_github_error(resp, context):
 
 
 def _pr_title(diagnosis):
-    return f"fix: {diagnosis['problem_summary'][:60]} [Drufiy]"
+    speculative_tag = "[SPECULATIVE] " if diagnosis.get("speculative") else ""
+    return f"{speculative_tag}fix: {diagnosis['problem_summary'][:60]} [Drufiy]"
 
 
-def _pr_body(diagnosis, branch_name):
+def _pr_body(diagnosis, branch_name, blame_info: dict | None = None):
     files_section = "\n".join(
         f"- `{f['path']}` — {f['explanation']}" for f in (diagnosis.get("files_changed") or [])
     )
     confidence_pct = int((diagnosis.get("confidence") or 0) * 100)
+
+    speculative_warning = ""
+    if diagnosis.get("speculative"):
+        speculative_warning = (
+            f"> ⚠️ **Speculative fix** — Drufiy is only {confidence_pct}% confident this resolves the issue. "
+            "Please review the diff carefully before merging.\n\n"
+        )
+
+    blame_section = ""
+    if blame_info:
+        author = blame_info["author_name"]
+        if blame_info.get("author_login"):
+            author = f"@{blame_info['author_login']}"
+        blame_section = (
+            f"\n**Introduced by:** {author} in "
+            f"`{blame_info['sha']}` — \"{blame_info['message']}\" ({blame_info['date']})\n"
+        )
+
     return f"""## 🤖 Drufiy Auto-Fix
 
-**Problem**
+{speculative_warning}**Problem**
 {diagnosis['problem_summary']}
 
 **Root Cause**
@@ -153,7 +203,7 @@ def _pr_body(diagnosis, branch_name):
 
 **Files Changed**
 {files_section}
-
+{blame_section}
 **Confidence:** {confidence_pct}% · **Category:** {diagnosis.get('category', 'unknown')} · **Fix Type:** {diagnosis['fix_type']}
 
 ---

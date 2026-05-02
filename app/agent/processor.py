@@ -323,6 +323,7 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
         "is_flaky_test": diagnosis.is_flaky_test,
         "category": diagnosis.category,
         "logs_truncated_warning": diagnosis.logs_truncated_warning,
+        "speculative": diagnosis.speculative,
         "files_changed": [fc.model_dump() for fc in diagnosis.files_changed],
     }
     result = supabase.table("diagnoses").insert(row).execute()

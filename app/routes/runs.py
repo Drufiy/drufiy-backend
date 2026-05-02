@@ -152,6 +152,111 @@ async def dashboard_stats(current_user: dict = Depends(get_current_user)):
     }
 
 
+# ── GET /runs/admin/stats ─────────────────────────────────────────────────────
+
+@router.get("/admin/stats")
+async def admin_stats(current_user: dict = Depends(get_current_user)):
+    """
+    Global fix success rate breakdown across all runs for this user.
+    Per-category fix rates, manual_required rate, average time to fix.
+    """
+    user_id = current_user["id"]
+
+    # Get all connected repo IDs for this user
+    repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
+    if not repos:
+        return {"message": "No repos connected", "overall_fix_rate": 0}
+
+    repo_ids = [r["id"] for r in repos]
+
+    # Fetch all ci_runs for this user
+    all_runs = (
+        supabase.table("ci_runs")
+        .select("id, status, created_at, updated_at")
+        .in_("repo_id", repo_ids)
+        .execute()
+        .data or []
+    )
+
+    total = len(all_runs)
+    if total == 0:
+        return {"message": "No runs yet", "overall_fix_rate": 0}
+
+    status_counts: dict[str, int] = {}
+    for run in all_runs:
+        s = run["status"]
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    verified = status_counts.get("verified", 0)
+    exhausted = status_counts.get("exhausted", 0)
+    fixed = status_counts.get("fixed", 0)  # PR created but not yet verified
+
+    # Avg time from created_at → updated_at for verified runs (minutes)
+    verified_runs = [r for r in all_runs if r["status"] == "verified"]
+    avg_fix_minutes = None
+    if verified_runs:
+        from datetime import datetime, timezone
+        deltas = []
+        for r in verified_runs:
+            try:
+                created = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))
+                deltas.append((updated - created).total_seconds() / 60)
+            except Exception:
+                pass
+        avg_fix_minutes = round(sum(deltas) / len(deltas), 1) if deltas else None
+
+    # Per-category stats from diagnoses table
+    run_ids = [r["id"] for r in all_runs]
+    all_diags = (
+        supabase.table("diagnoses")
+        .select("run_id, category, fix_type, verification_status, speculative")
+        .in_("run_id", run_ids)
+        .execute()
+        .data or []
+    )
+
+    # Map run_id → latest diagnosis (highest iteration already filtered via order not available here,
+    # so we dedupe by keeping last seen — diagnoses are ordered by created_at ascending)
+    diag_map: dict[str, dict] = {}
+    for d in all_diags:
+        diag_map[d["run_id"]] = d  # last one wins (latest iteration)
+
+    categories = ["code", "workflow_config", "dependency", "environment", "flaky_test", "unknown"]
+    category_stats: dict[str, dict] = {}
+    manual_required_count = 0
+    speculative_count = 0
+
+    for cat in categories:
+        cat_diags = [d for d in diag_map.values() if d.get("category") == cat]
+        cat_verified = sum(1 for d in cat_diags if d.get("verification_status") == "verified")
+        cat_total = len(cat_diags)
+        category_stats[cat] = {
+            "total": cat_total,
+            "verified": cat_verified,
+            "fix_rate": round(cat_verified / max(cat_total, 1), 2),
+        }
+
+    for d in diag_map.values():
+        if d.get("fix_type") == "manual_required":
+            manual_required_count += 1
+        if d.get("speculative"):
+            speculative_count += 1
+
+    return {
+        "total_runs": total,
+        "verified": verified,
+        "fixed_pending_verification": fixed,
+        "exhausted": exhausted,
+        "overall_fix_rate": round(verified / max(total, 1), 2),
+        "manual_required_rate": round(manual_required_count / max(total, 1), 2),
+        "speculative_prs": speculative_count,
+        "avg_fix_minutes": avg_fix_minutes,
+        "by_status": status_counts,
+        "by_category": category_stats,
+    }
+
+
 # ── GET /runs/{run_id} ────────────────────────────────────────────────────────
 
 @router.get("/{run_id}")

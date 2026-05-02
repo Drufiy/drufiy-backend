@@ -38,7 +38,7 @@ async def list_github_repos(current_user: dict = Depends(get_current_user)):
             resp = await client.get(
                 f"{GITHUB_API}/user/repos",
                 headers=_gh_headers(token),
-                params={"per_page": 100, "sort": "updated", "affiliation": "owner,collaborator", "page": page},
+                params={"per_page": 100, "sort": "updated", "affiliation": "owner,collaborator,organization_member", "page": page},
             )
             if resp.status_code == 401:
                 raise HTTPException(status_code=401, detail="GitHub token expired — please re-authenticate")
@@ -136,6 +136,17 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
         )
 
         if hook_resp.status_code == 403:
+            # Check if this is an org repo — gives a clearer error message
+            is_org_repo = "/" in body.repo_full_name and body.repo_full_name.split("/")[0] != current_user["github_username"]
+            if is_org_repo:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Cannot install webhook on org repo '{body.repo_full_name}'. "
+                        "Your token lacks admin:repo_hook permission for this org. "
+                        "Ask your org admin to grant access, or use the Drufiy GitHub App (coming soon)."
+                    ),
+                )
             raise HTTPException(
                 status_code=403,
                 detail="insufficient_scope — please re-authenticate to grant webhook permissions",

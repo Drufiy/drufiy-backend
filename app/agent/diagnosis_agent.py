@@ -483,9 +483,16 @@ async def diagnose_failure(
         updates["fix_type"] = "review_recommended"
 
     if diagnosis.confidence < 0.4 and diagnosis.fix_type == "review_recommended":
-        logger.warning(f"Very low confidence ({diagnosis.confidence}) — downgrading to manual_required")
-        updates["fix_type"] = "manual_required"
-        updates["files_changed"] = []
+        # Only downgrade to manual_required for environment/flaky failures — those genuinely can't be
+        # auto-fixed. For code/dependency/workflow failures, keep as review_recommended (speculative PR)
+        # so the user still gets a reviewable fix attempt rather than a dead-end.
+        if diagnosis.category in ("environment", "flaky_test", "unknown"):
+            logger.warning(f"Very low confidence ({diagnosis.confidence}) + category={diagnosis.category} — downgrading to manual_required")
+            updates["fix_type"] = "manual_required"
+            updates["files_changed"] = []
+        else:
+            logger.info(f"Low confidence ({diagnosis.confidence}) but category={diagnosis.category} — keeping as speculative review_recommended")
+            updates["speculative"] = True
 
     # NOTE: review_recommended/safe_auto_apply ↔ manual_required coercion is now handled
     # automatically by Diagnosis.coerce_fix_type() @model_validator — no need to duplicate here.

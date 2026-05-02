@@ -34,6 +34,7 @@ class Diagnosis(BaseModel):
     files_changed: list[FileChange] = Field(default_factory=list)
     category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "unknown"]
     logs_truncated_warning: bool = Field(default=False)
+    speculative: bool = Field(default=False, description="True when confidence is low but a best-guess PR is still created for review")
 
     @model_validator(mode="after")
     def coerce_fix_type(self) -> "Diagnosis":
