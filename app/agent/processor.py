@@ -165,10 +165,11 @@ async def process_failure(ci_run_id: str):
 
 async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis: dict):
     """
-    Called by webhook.py when CI fails on the fix branch.
+    Called when CI fails on a Drufiy fix branch.
     Re-diagnoses with context from the previous failed attempt.
     """
-    logger.info(f"process_iteration_2 start run_id={ci_run_id}")
+    next_iteration = max(int(previous_diagnosis.get("iteration", 1)) + 1, 2)
+    logger.info(f"process_iteration_2 start run_id={ci_run_id} next_iteration={next_iteration}")
     try:
         _update_status(ci_run_id, "diagnosing")
 
@@ -183,7 +184,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         workflow_name = ci_run.get("github_workflow_name") or "CI"
 
         if not new_logs:
-            await _mark_failed(ci_run_id, "exhausted", "Iteration 2 had no logs to diagnose")
+            await _mark_failed(ci_run_id, "exhausted", f"Iteration {next_iteration} had no logs to diagnose")
             return
 
         access_token_iter2 = _get_access_token(repo["user_id"])
@@ -210,7 +211,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
                 workflow_name=workflow_name,
-                iteration=2,
+                iteration=next_iteration,
                 previous_diagnosis=previous_diagnosis,
                 run_id=ci_run_id,
                 commit_sha=commit_sha,
@@ -218,15 +219,15 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 current_files=current_files_iter2 or None,
             )
         except DiagnosisValidationError as e:
-            logger.error(f"Iteration 2 diagnosis failed for run {ci_run_id}: {e}")
+            logger.error(f"Iteration {next_iteration} diagnosis failed for run {ci_run_id}: {e}")
             await _mark_failed(ci_run_id, "exhausted", str(e)[:300])
             return
 
-        diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=2)
+        diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=next_iteration)
         _update_status(ci_run_id, "diagnosed")
-        logger.info(f"Iteration 2 diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type}")
+        logger.info(f"Iteration {next_iteration} diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type}")
 
-        # Iteration 2: only auto-apply if very high confidence — be conservative
+        # Follow-up iterations: only auto-apply if very high confidence.
         if (
             diagnosis.fix_type == "safe_auto_apply"
             and not diagnosis.is_flaky_test

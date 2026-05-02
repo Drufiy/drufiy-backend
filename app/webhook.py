@@ -159,12 +159,6 @@ async def handle_verification_event(payload: dict):
             _update_known_good_files(ci_run, repo["id"])
 
         else:
-            logger.info(f"Some workflows failed — triggering iteration 2 for run {ci_run_id}")
-            supabase.table("ci_runs").update({
-                "status": "iteration_2",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", ci_run_id).execute()
-
             prev_diag_result = (
                 supabase.table("diagnoses")
                 .select("*")
@@ -174,6 +168,22 @@ async def handle_verification_event(payload: dict):
                 .execute()
             )
             previous_diagnosis = prev_diag_result.data[0] if prev_diag_result.data else {}
+            max_iteration = previous_diagnosis.get("iteration", 1)
+            if max_iteration >= 4:
+                logger.info(f"Some workflows failed and run {ci_run_id} is already at iteration {max_iteration} → exhausted")
+                supabase.table("ci_runs").update({
+                    "status": "exhausted",
+                    "error_message": "Fix branch CI failed after 4 iterations — manual intervention required",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", ci_run_id).execute()
+                return
+
+            next_iteration = max_iteration + 1
+            logger.info(f"Some workflows failed — triggering iteration {next_iteration} for run {ci_run_id}")
+            supabase.table("ci_runs").update({
+                "status": f"iteration_{next_iteration}",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", ci_run_id).execute()
 
             # Fetch logs from the failed run on the fix branch
             failed_run = next((r for r in all_runs if r.get("conclusion") != "success"), None)
@@ -187,7 +197,7 @@ async def handle_verification_event(payload: dict):
                         access_token=access_token,
                     )
                 except Exception as e:
-                    logger.warning(f"Could not fetch iteration 2 logs: {e}")
+                    logger.warning(f"Could not fetch iteration {next_iteration} logs: {e}")
 
             from app.agent.processor import process_iteration_2
             await process_iteration_2(ci_run_id, new_logs, previous_diagnosis)

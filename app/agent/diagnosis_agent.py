@@ -455,7 +455,7 @@ async def diagnose_failure(
         )
         logger.info(f"Force-fix mode enabled for run {run_id}")
 
-    call_type = "iteration_2_diagnosis" if iteration == 2 else "diagnosis"
+    call_type = f"iteration_{iteration}_diagnosis" if iteration > 1 else "diagnosis"
     if force_fix:
         call_type = "force_fix_diagnosis"
 
@@ -539,14 +539,14 @@ def _build_user_prompt(
 
     parts.append(f"\nCI FAILURE LOGS:\n---\n{logs}\n---")
 
-    # Iteration 2: append previous diagnosis context as clean JSON
-    if iteration == 2 and previous_diagnosis:
+    # Follow-up iterations: append previous diagnosis context as clean JSON
+    if iteration > 1 and previous_diagnosis:
         prev_clean = {
             k: previous_diagnosis.get(k)
             for k in ("problem_summary", "root_cause", "fix_description", "files_changed")
         }
         parts.append(
-            "\n\nIMPORTANT — ITERATION 2:\n"
+            f"\n\nIMPORTANT — FOLLOW-UP ITERATION {iteration}:\n"
             "The previous fix attempt was applied and CI FAILED AGAIN on the fix branch.\n"
             "Previous diagnosis that failed:\n"
             f"{json.dumps(prev_clean, indent=2)}\n\n"
@@ -555,7 +555,7 @@ def _build_user_prompt(
             "  1. What the previous diagnosis got wrong or missed\n"
             "  2. Whether the original root cause was misidentified, or the fix was incomplete\n"
             "  3. A new fix that addresses both the original and the new failure\n\n"
-            "If you cannot confidently fix this on iteration 2, set fix_type='manual_required'."
+            f"If you cannot confidently fix this on iteration {iteration}, set fix_type='manual_required'."
         )
 
     return "\n".join(parts)

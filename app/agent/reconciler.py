@@ -156,20 +156,19 @@ async def _reconcile_one(ci_run: dict) -> int:
         previous_diagnosis = diag_result.data[0] if diag_result.data else {}
         max_iteration = previous_diagnosis.get("iteration", 1)
 
-        if max_iteration >= 2:
-            # Already on iteration 2 — mark exhausted
+        if max_iteration >= 4:
             logger.info(f"Reconciler: run {ci_run_id[:8]} fix branch failed on iter {max_iteration} → exhausted")
             supabase.table("ci_runs").update({
                 "status": "exhausted",
-                "error_message": "Fix branch CI failed on iteration 2 — manual intervention required",
+                "error_message": "Fix branch CI failed after 4 iterations — manual intervention required",
                 "updated_at": now,
             }).eq("id", ci_run_id).execute()
             return 1
 
-        # Iteration 1 fix failed — kick off iteration 2
-        logger.info(f"Reconciler: run {ci_run_id[:8]} fix branch CI failed → triggering iteration 2")
+        next_iteration = max_iteration + 1
+        logger.info(f"Reconciler: run {ci_run_id[:8]} fix branch CI failed → triggering iteration {next_iteration}")
         supabase.table("ci_runs").update({
-            "status": "iteration_2",
+            "status": f"iteration_{next_iteration}",
             "updated_at": now,
         }).eq("id", ci_run_id).execute()
 
@@ -183,7 +182,7 @@ async def _reconcile_one(ci_run: dict) -> int:
                 access_token=access_token,
             )
         except Exception as e:
-            logger.warning(f"Reconciler: could not fetch logs for iter2 on {ci_run_id[:8]}: {e}")
+            logger.warning(f"Reconciler: could not fetch logs for iter{next_iteration} on {ci_run_id[:8]}: {e}")
 
         from app.agent.processor import process_iteration_2
         await process_iteration_2(ci_run_id, new_logs, previous_diagnosis)
