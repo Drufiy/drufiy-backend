@@ -170,23 +170,24 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
             },
         )
 
-        if hook_resp.status_code == 403:
-            # Check if this is an org repo — gives a clearer error message
-            is_org_repo = "/" in body.repo_full_name and body.repo_full_name.split("/")[0] != current_user["github_username"]
-            if is_org_repo:
+        webhook_pending = False
+        repo_owner = body.repo_full_name.split("/")[0]
+        is_external = repo_owner != current_user["github_username"]
+
+        if hook_resp.status_code in (403, 404):
+            if is_external:
+                # Can't install webhook on a collab repo — connect without webhook.
+                # User needs to either ask repo owner to install the GitHub App,
+                # or manually add the webhook in GitHub repo settings.
+                logger.info(f"Connecting collab repo {body.repo_full_name} without webhook (no admin access)")
+                webhook_id = None
+                webhook_pending = True
+            else:
                 raise HTTPException(
                     status_code=403,
-                    detail=(
-                        f"Cannot install webhook on '{body.repo_full_name}'. "
-                        "Make sure the Prash GitHub App is installed on this org/account. "
-                        "Go to Repos page and click 'Install GitHub App'."
-                    ),
+                    detail="insufficient_scope — please re-authenticate to grant webhook permissions",
                 )
-            raise HTTPException(
-                status_code=403,
-                detail="insufficient_scope — please re-authenticate to grant webhook permissions",
-            )
-        if hook_resp.status_code == 422:
+        elif hook_resp.status_code == 422:
             # Webhook already exists — fetch existing webhook ID
             hooks_resp = await client.get(
                 f"{GITHUB_API}/repos/{body.repo_full_name}/hooks", headers=headers
@@ -222,6 +223,7 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
         raise HTTPException(status_code=500, detail="Failed to store connected repo")
 
     repo_row = insert_result.data[0]
+    repo_row["webhook_pending"] = webhook_pending
 
     # Warm up known_good_files cache (best-effort)
     try:
