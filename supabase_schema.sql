@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS public.diagnoses (
   is_flaky_test BOOLEAN DEFAULT false,
   category TEXT,
   logs_truncated_warning BOOLEAN DEFAULT false,
+  required_secrets JSONB DEFAULT '[]'::jsonb,
   files_changed JSONB,
   github_pr_url TEXT,
   github_pr_number INT,
