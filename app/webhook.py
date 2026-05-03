@@ -124,8 +124,16 @@ async def handle_verification_event(payload: dict):
             return
 
         all_runs_raw = resp.json().get("workflow_runs", [])
-        # Filter client-side by head_branch — works for both push and pull_request events
-        all_runs = [r for r in all_runs_raw if r.get("head_branch") == branch]
+        # Filter client-side by head_branch — works for both push and pull_request events.
+        # Also exclude CI runs on the original bad commit SHA: when Prash creates a fix branch
+        # via the API, GitHub fires a push event on the base (still-broken) commit before the
+        # fix is committed. That run will fail and falsely trigger iteration 2.
+        original_sha = ci_run.get("commit_sha", "")
+        all_runs = [
+            r for r in all_runs_raw
+            if r.get("head_branch") == branch
+            and r.get("head_sha") != original_sha  # skip base-commit CI (expected to fail)
+        ]
         # Only count completed runs — ignore in_progress/queued
         completed_runs = [r for r in all_runs if r.get("status") == "completed"]
         total_expected = len(completed_runs)
