@@ -402,7 +402,10 @@ async def call_with_investigation(
 
             if error is None:
                 tool_result = await execute_tool(tool_name, tool_args)
-                messages.append({
+                # Kimi requires reasoning_content in assistant messages when thinking
+                # is enabled. Without it: "thinking is enabled but reasoning_content
+                # is missing in assistant tool call message at index N"
+                assistant_msg = {
                     "role": "assistant",
                     "content": message.content or "",
                     "tool_calls": [{
@@ -413,7 +416,11 @@ async def call_with_investigation(
                             "arguments": tool_call.function.arguments,
                         },
                     }],
-                })
+                }
+                reasoning = getattr(message, "reasoning_content", None)
+                if reasoning:
+                    assistant_msg["reasoning_content"] = reasoning
+                messages.append(assistant_msg)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
@@ -469,26 +476,9 @@ async def call_with_tool(
         {"role": "user", "content": user_prompt},
     ]
 
+    # Treat all models as "kimi" — DeepSeek fallback is disabled
     if model == "deepseek":
-        if not deepseek:
-            raise DiagnosisValidationError("DeepSeek model requested but deepseek_api_key is not configured.")
-        args, raw, usage = await _call_openai_compatible_fallback(
-            deepseek, settings.deepseek_model, messages, tool_schema, "DeepSeek"
-        )
-        _log_agent_call(
-            run_id,
-            call_type,
-            settings.deepseek_model,
-            messages,
-            raw,
-            args,
-            usage,
-            valid=(args is not None),
-            error="DeepSeek returned no tool call" if args is None else None,
-        )
-        if args is not None:
-            return args
-        raise DiagnosisValidationError("DeepSeek returned no valid tool call.")
+        logger.warning(f"DeepSeek requested for run {run_id} but fallback is disabled — using Kimi")
 
     # Attempt 1: Kimi K2.6
     args, raw, usage = await _call_kimi(messages, tool_schema)
@@ -505,23 +495,7 @@ async def call_with_tool(
     if args is not None:
         return args
 
-    if model == "kimi":
-        raise DiagnosisValidationError("Kimi returned no valid tool call after 2 attempts.")
-
-    logger.warning("Kimi attempt 2: still no valid tool call — trying DeepSeek fallback")
-
-    # Attempt 3: DeepSeek fallback
-    if deepseek:
-        args, raw, usage = await _call_openai_compatible_fallback(
-            deepseek, settings.deepseek_model, messages, tool_schema, "DeepSeek"
-        )
-        _log_agent_call(run_id, call_type, settings.deepseek_model, messages, raw, args, usage,
-                        valid=(args is not None), error="DeepSeek returned no tool call" if args is None else None)
-        if args is not None:
-            logger.info("DeepSeek fallback succeeded")
-            return args
-
     raise DiagnosisValidationError(
-        "All 3 model attempts (Kimi x2 + DeepSeek) returned no valid tool call. "
+        "Kimi returned no valid tool call after 2 attempts. "
         "Check agent_calls table for raw responses."
     )

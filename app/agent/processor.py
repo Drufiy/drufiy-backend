@@ -21,7 +21,7 @@ from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_repo_access_token
-from app.notifier import notify_deepseek_fallback, notify_diagnosis_failed, notify_exhausted
+from app.notifier import notify_diagnosis_failed, notify_exhausted
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
@@ -116,7 +116,8 @@ async def process_failure(ci_run_id: str):
 
         # ── 5. Diagnose ──────────────────────────────────────────────────────
         try:
-            diagnosis = await _diagnose_with_parallel_models(
+            diagnosis = await diagnose_failure(
+                model="kimi",
                 logs=logs,
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
@@ -243,7 +244,8 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         similar_fixes_iter2 = _fetch_similar_fixes(repo["id"])
 
         try:
-            diagnosis = await _diagnose_with_parallel_models(
+            diagnosis = await diagnose_failure(
+                model="kimi",
                 logs=new_logs,
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
@@ -785,9 +787,11 @@ async def _sleep(seconds: int):
 
 
 async def _sanity_check_fix(ci_run_id: str, diagnosis) -> tuple[bool, str]:
-    if not settings.deepseek_api_key:
-        return True, "DeepSeek sanity review skipped because no deepseek_api_key is configured."
-
+    """
+    Sanity-check the proposed fix using Kimi.
+    If the review call fails for any reason, approve by default (fail-open)
+    so we don't block PRs on transient API errors.
+    """
     review_prompt = f"""
 Review this proposed CI fix before it is auto-applied.
 
@@ -813,11 +817,11 @@ and is unlikely to introduce a new breakage.
             tool_schema=SANITY_REVIEW_TOOL,
             run_id=ci_run_id,
             call_type="sanity_review",
-            model="deepseek",
+            model="kimi",
         )
     except Exception as e:
-        logger.warning(f"DeepSeek sanity review failed for run {ci_run_id}: {e}")
-        return True, f"DeepSeek sanity review failed open: {e}"
+        logger.warning(f"Sanity review failed for run {ci_run_id}: {e}")
+        return True, f"Sanity review failed open: {e}"
 
     return bool(review.get("approve")), review.get("reason", "")
 
@@ -868,112 +872,6 @@ def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:
         return []
 
 
-async def _diagnose_with_parallel_models(**kwargs):
-    """
-    Run Kimi and DeepSeek in parallel.
-    Return the first confident diagnosis immediately, but keep both results
-    when the first one is low-confidence or unknown so we can merge them.
-    """
-    kimi_task = asyncio.create_task(diagnose_failure(model="kimi", **kwargs))
-    task_labels = {kimi_task: "kimi"}
-    tasks = {kimi_task}
-
-    deepseek_enabled = bool(settings.deepseek_api_key)
-    if deepseek_enabled:
-        deepseek_task = asyncio.create_task(diagnose_failure(model="deepseek", **kwargs))
-        tasks.add(deepseek_task)
-        task_labels[deepseek_task] = "deepseek"
-
-    errors: list[str] = []
-    results: list[tuple[str, object]] = []
-    try:
-        while tasks:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                try:
-                    result = task.result()
-                except DiagnosisValidationError as e:
-                    errors.append(str(e))
-                    tasks.remove(task)
-                    continue
-                except Exception as e:
-                    errors.append(str(e))
-                    tasks.remove(task)
-                    continue
-
-                label = task_labels.get(task, "unknown")
-                results.append((label, result))
-
-                needs_consensus = (
-                    result.category == "unknown" or result.confidence < 0.5
-                )
-                if not needs_consensus or not pending:
-                    for other in pending:
-                        other.cancel()
-                    return result
-
-            if len(results) >= 2:
-                return _merge_diagnoses(results[0][1], results[1][1])
-
-            tasks = pending
-    finally:
-        for task in tasks:
-            task.cancel()
-
-    if len(results) >= 2:
-        return _merge_diagnoses(results[0][1], results[1][1])
-    if results:
-        return results[0][1]
-    if errors:
-        raise DiagnosisValidationError(" | ".join(errors[:2]))
-    raise DiagnosisValidationError("No model returned a valid diagnosis.")
-
-
-def _merge_diagnoses(primary, secondary):
-    if _diagnoses_agree(primary, secondary):
-        higher = primary if primary.confidence >= secondary.confidence else secondary
-        boosted_confidence = min(max(primary.confidence, secondary.confidence) + 0.1, 1.0)
-        return higher.model_copy(update={"confidence": boosted_confidence})
-
-    if primary.category == "unknown" and secondary.category != "unknown" and secondary.confidence >= 0.5:
-        return secondary
-    if secondary.category == "unknown" and primary.category != "unknown" and primary.confidence >= 0.5:
-        return primary
-
-    if secondary.confidence > primary.confidence and secondary.confidence >= 0.5:
-        return secondary
-    if primary.confidence > secondary.confidence and primary.confidence >= 0.5:
-        return primary
-
-    higher = primary if primary.confidence >= secondary.confidence else secondary
-    return higher.model_copy(
-        update={
-            "category": "unknown",
-            "fix_type": "manual_required",
-            "files_changed": [],
-            "root_cause": (
-                f"Kimi and DeepSeek disagreed on the root cause. "
-                f"Primary: {primary.root_cause} Secondary: {secondary.root_cause}"
-            )[:2000],
-        }
-    )
-
-
-def _diagnoses_agree(primary, secondary) -> bool:
-    if primary.category != secondary.category and "unknown" not in {primary.category, secondary.category}:
-        return False
-
-    primary_keywords = _keyword_set(f"{primary.problem_summary} {primary.root_cause}")
-    secondary_keywords = _keyword_set(f"{secondary.problem_summary} {secondary.root_cause}")
-    overlap = len(primary_keywords & secondary_keywords)
-    return overlap >= 3
-
-
-def _keyword_set(text: str) -> set[str]:
-    return {
-        token for token in re.findall(r"[a-z0-9_]+", text.lower())
-        if len(token) > 2
-    }
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -1064,14 +962,14 @@ async def _apply_fix(ci_run_id: str, repo_full_name: str, access_token: str, rep
 
     approved, review_reason = await _sanity_check_fix(ci_run_id, diagnosis)
     if not approved:
-        logger.warning(f"DeepSeek sanity review rejected auto-apply for run {ci_run_id}: {review_reason}")
+        logger.warning(f"Sanity review rejected auto-apply for run {ci_run_id}: {review_reason}")
         supabase.table("ci_runs").update({
             "status": "diagnosed",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", ci_run_id).execute()
         supabase.table("diagnoses").update({
             "fix_type": "review_recommended",
-            "fix_description": f"{diagnosis.fix_description}\n\nDeepSeek review: {review_reason}",
+            "fix_description": f"{diagnosis.fix_description}\n\nReview: {review_reason}",
         }).eq("id", diagnosis_row["id"]).execute()
         return
 

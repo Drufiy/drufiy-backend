@@ -83,6 +83,17 @@ async def handle_verification_event(payload: dict):
         logger.info(f"Verification event ignored — ci_run {ci_run_id} status={ci_run['status']}")
         return
 
+    # Only process events from the LATEST fix branch for this ci_run.
+    # When multiple iterations create new branches, we must ignore events
+    # from older branches to prevent stale failures from triggering new iterations.
+    stored_branch = ci_run.get("fix_branch_name") or ""
+    if stored_branch and branch != stored_branch:
+        logger.info(
+            f"Verification event ignored — branch {branch} does not match "
+            f"latest fix branch {stored_branch} for run {ci_run_id}"
+        )
+        return
+
     # Atomically append this workflow — avoids lost-update race conditions when
     # multiple workflow_run events arrive concurrently for the same ci_run.
     append_result = supabase.rpc(
@@ -93,6 +104,7 @@ async def handle_verification_event(payload: dict):
                 "workflow_id": workflow_id,
                 "workflow_name": workflow_name,
                 "conclusion": conclusion,
+                "branch": branch,
             },
         },
     ).execute()
