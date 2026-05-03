@@ -231,7 +231,7 @@ async def _call_openai_compatible_fallback(
             tools=[{"type": "function", "function": tool_schema}],
             tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
             max_tokens=8000,
-            temperature=0.2,
+            temperature=1,  # DeepSeek V4 Pro only accepts temperature=1
         )
     except Exception as e:
         logger.error(f"{label} fallback failed: {e}")
