@@ -109,7 +109,7 @@ async def _call_kimi_reasoning(messages: list):
             model=settings.kimi_model,
             messages=messages,
             max_tokens=4000,
-            temperature=0.2,
+            temperature=1,  # kimi-k2.6 with thinking enabled requires temperature=1
             extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
         )
     except Exception as e:
@@ -274,7 +274,7 @@ async def _call_kimi_with_tools(messages: list, tools: list[dict]):
             messages=messages,
             tools=[{"type": "function", "function": tool} for tool in tools],
             max_tokens=4000,
-            temperature=0.2,
+            temperature=1,  # kimi-k2.6 with thinking enabled requires temperature=1
             extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
         )
     except Exception as e:
