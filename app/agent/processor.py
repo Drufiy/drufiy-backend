@@ -183,8 +183,12 @@ async def process_failure(ci_run_id: str):
 
         # ── 7. Auto-apply if safe ────────────────────────────────────────────
         if diagnosis.fix_type == "safe_auto_apply" and not diagnosis.is_flaky_test:
-            logger.info(f"safe_auto_apply — creating fix PR for run {ci_run_id}")
-            await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
+            # Deduplication: skip if there's already an open Drufiy PR for this repo
+            if await _has_open_drufiy_pr(repo_full_name, access_token):
+                logger.info(f"Skipping PR for run {ci_run_id} — existing open Drufiy PR found for {repo_full_name}")
+            else:
+                logger.info(f"safe_auto_apply — creating fix PR for run {ci_run_id}")
+                await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
         else:
             logger.info(f"Fix type '{diagnosis.fix_type}' — waiting for user action on run {ci_run_id}")
 
@@ -973,6 +977,35 @@ def _keyword_set(text: str) -> set[str]:
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+async def _has_open_drufiy_pr(repo_full_name: str, access_token: str) -> bool:
+    """
+    Check if there's already an open PR from Drufiy for this repo.
+    Prevents duplicate PRs when multiple CI runs fail for the same issue.
+    """
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{repo_full_name}/pulls",
+                headers=headers,
+                params={"state": "open", "per_page": 10, "sort": "created", "direction": "desc"},
+            )
+            if resp.status_code != 200:
+                return False
+            for pr in resp.json():
+                head_ref = pr.get("head", {}).get("ref", "")
+                if head_ref.startswith("drufiy/fix-run-"):
+                    logger.info(f"Dedup: found open Drufiy PR #{pr['number']} ({head_ref}) for {repo_full_name}")
+                    return True
+    except Exception as e:
+        logger.warning(f"Dedup check failed for {repo_full_name}: {e}")
+    return False
+
 
 def _load_run_and_repo(ci_run_id: str):
     try:

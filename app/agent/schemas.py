@@ -23,7 +23,9 @@ class FileChange(BaseModel):
         if len(v) > 200_000:
             raise ValueError("new_content exceeds 200KB — likely hallucinated")
         if len(v.strip()) == 0:
-            raise ValueError("new_content is empty")
+            # Convert empty string to None instead of hard-rejecting.
+            # The model_validator will check if a valid patch exists as fallback.
+            return None
         return v
 
     @field_validator("patch")
