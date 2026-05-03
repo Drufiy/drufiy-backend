@@ -124,7 +124,11 @@ async def _call_kimi_reasoning(messages: list):
 
     latency_ms = int((time.time() - start) * 1000)
     msg = response.choices[0].message
-    reasoning = msg.content or ""
+    # Kimi thinking responses put the analysis in reasoning_content, content may be empty
+    reasoning_content = getattr(msg, "reasoning_content", None) or ""
+    content = msg.content or ""
+    reasoning = reasoning_content or content  # prefer reasoning_content (the actual thinking)
+    logger.info(f"Kimi reasoning: content={len(content)} chars, reasoning_content={len(reasoning_content)} chars")
     return reasoning, reasoning, _usage_from_response(response, latency_ms)
 
 
@@ -192,12 +196,16 @@ async def _call_kimi(messages: list, tool_schema: dict):
     if not reasoning:
         return None, reasoning_raw, reasoning_usage
 
+    # Append reasoning as a user-side context note rather than a fake assistant message.
+    # Kimi rejects synthetic assistant messages when thinking was enabled in a prior turn.
     structured_messages = [
         *messages,
-        {"role": "assistant", "content": f"My analysis:\n{reasoning}"},
         {
             "role": "user",
-            "content": "Now submit your structured diagnosis using the tool. Follow the system instructions exactly.",
+            "content": (
+                f"Here is your analysis of the failure:\n\n{reasoning}\n\n"
+                "Now submit your structured diagnosis using the tool. Follow the system instructions exactly."
+            ),
         },
     ]
     args, structured_raw, structured_usage = await _call_kimi_structured(structured_messages, tool_schema)
