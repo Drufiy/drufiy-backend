@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.auth import get_current_user
 from app.config import settings
 from app.db import supabase
+from app.github_app import get_installation_token, github_app_enabled
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -22,6 +23,38 @@ def _gh_headers(token: str) -> dict:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+
+
+async def _best_token_for_repo(repo_full_name: str, user_id: str, oauth_token: str) -> str:
+    """
+    Returns the best available token to act on a repo:
+    - If GitHub App is enabled and the user has an installation that covers the
+      repo's owner account, returns an installation token (works for org + collab repos).
+    - Falls back to the user's OAuth token.
+    """
+    if not github_app_enabled():
+        return oauth_token
+
+    repo_owner = repo_full_name.split("/")[0]
+    try:
+        rows = (
+            supabase.table("app_installations")
+            .select("installation_id, account_login")
+            .eq("user_id", user_id)
+            .execute()
+        ).data or []
+
+        # Prefer installation whose account_login matches the repo owner
+        matched = next((r for r in rows if r.get("account_login") == repo_owner), None)
+        # Fall back to any installation the user has
+        installation = matched or (rows[0] if rows else None)
+
+        if installation:
+            return await get_installation_token(int(installation["installation_id"]))
+    except Exception as e:
+        logger.warning(f"Could not get installation token for {repo_full_name}: {e}")
+
+    return oauth_token
 
 
 # ── List user's GitHub repos (not yet connected) ────────────────────────────
@@ -108,7 +141,9 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
         return existing.data[0]
 
     webhook_url = f"{settings.public_backend_url}/webhook/github"
-    headers = _gh_headers(token)
+    # Use GitHub App installation token when available (supports org + collab repos)
+    best_token = await _best_token_for_repo(body.repo_full_name, user_id, token)
+    headers = _gh_headers(best_token)
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         # Fetch actual default branch from GitHub
@@ -142,9 +177,9 @@ async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(ge
                 raise HTTPException(
                     status_code=403,
                     detail=(
-                        f"Cannot install webhook on org repo '{body.repo_full_name}'. "
-                        "Your token lacks admin:repo_hook permission for this org. "
-                        "Ask your org admin to grant access, or use the Drufiy GitHub App (coming soon)."
+                        f"Cannot install webhook on '{body.repo_full_name}'. "
+                        "Make sure the Prash GitHub App is installed on this org/account. "
+                        "Go to Repos page and click 'Install GitHub App'."
                     ),
                 )
             raise HTTPException(
