@@ -183,6 +183,47 @@ async def github_app_install_url():
     }
 
 
+class RegisterAppInstallRequest(BaseModel):
+    installation_id: int
+    setup_action: str | None = None
+
+
+@router.post("/github-app/register")
+async def github_app_register(
+    body: RegisterAppInstallRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Called by the frontend after GitHub App installation redirect.
+    GitHub redirects to the frontend with ?installation_id=XXX, and the frontend
+    calls this authenticated endpoint to store the installation.
+    """
+    if not github_app_enabled():
+        raise HTTPException(status_code=503, detail="GitHub App is not configured")
+
+    try:
+        installation_token = await get_installation_token(body.installation_id)
+        repos = await list_installation_repos(installation_token)
+    except Exception as e:
+        logger.warning(f"GitHub App register failed for installation {body.installation_id}: {e}")
+        raise HTTPException(status_code=502, detail="Failed to fetch installation repositories")
+
+    supabase.table("app_installations").upsert(
+        {
+            "user_id": current_user["id"],
+            "installation_id": body.installation_id,
+            "account_login": (repos[0].get("owner") or {}).get("login") if repos else None,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="installation_id",
+    ).execute()
+
+    return {
+        "installation_id": body.installation_id,
+        "repositories_count": len(repos),
+    }
+
+
 @router.get("/github-app/callback")
 async def github_app_callback(
     installation_id: int,
