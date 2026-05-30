@@ -556,7 +556,118 @@ async def diagnose_failure(
     if updates:
         diagnosis = diagnosis.model_copy(update=updates)
 
-    return diagnosis
+    return _apply_deterministic_guardrails(diagnosis, preprocessed)
+
+
+_BARE_MODULE_RE = re.compile(
+    r"(?:Cannot find module|MODULE_NOT_FOUND.*module|ModuleNotFoundError:\s+No module named)\s+['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+_SECRET_RE = re.compile(
+    r"\b([A-Z][A-Z0-9_]{2,})\b\s+(?:is\s+)?(?:not defined|not set|missing|required)",
+    re.IGNORECASE,
+)
+_DOCKER_COPY_SOURCE_RE = re.compile(r"\bCOPY\s+(?:--\S+\s+)*(?P<path>\.?/?[\w./-]+)", re.IGNORECASE)
+_DOCKER_STAT_PATH_RE = re.compile(r"\bstat\s+(?P<path>\.?/?[\w./-]+):", re.IGNORECASE)
+
+
+def _apply_deterministic_guardrails(
+    diagnosis: Diagnosis,
+    logs: str,
+) -> Diagnosis:
+    updates: dict = {}
+
+    missing_modules = [m for m in _extract_missing_modules(logs) if _is_bare_package_name(m)]
+    if missing_modules and diagnosis.files_changed:
+        if not _changes_dependency_or_workflow(diagnosis):
+            updates["fix_type"] = "review_recommended"
+            updates["speculative"] = True
+            updates["fix_description"] = (
+                f"{diagnosis.fix_description}\n\n"
+                "Guardrail: the logs show a missing package/module "
+                f"({', '.join(sorted(set(missing_modules)))}) rather than a missing source file. "
+                "Source-file rewrites are held for review unless the fix updates a manifest or CI workflow."
+            )
+
+    secrets = _extract_required_secrets(logs)
+    if secrets:
+        updates["category"] = "environment"
+        updates["fix_type"] = "manual_required"
+        updates["files_changed"] = []
+        updates["required_secrets"] = sorted(set([*diagnosis.required_secrets, *secrets]))
+
+    missing_copy_path = _extract_missing_docker_copy_path(logs)
+    if missing_copy_path and diagnosis.fix_type == "safe_auto_apply":
+        allowed_paths = {missing_copy_path, missing_copy_path.lstrip("./")}
+        touches_dockerfile = any(fc.path.lower().endswith("dockerfile") or fc.path == "Dockerfile" for fc in diagnosis.files_changed)
+        creates_exact_path = any(fc.path in allowed_paths for fc in diagnosis.files_changed)
+        if not touches_dockerfile and not creates_exact_path:
+            updates["fix_type"] = "review_recommended"
+            updates["speculative"] = True
+            updates["fix_description"] = (
+                f"{updates.get('fix_description', diagnosis.fix_description)}\n\n"
+                f"Guardrail: Docker reported missing build-context path `{missing_copy_path}`. "
+                "The proposed file changes do not touch that exact path or the Dockerfile, so this needs review."
+            )
+
+    if not updates:
+        return diagnosis
+    return diagnosis.model_copy(update=updates)
+
+
+def _extract_missing_modules(logs: str) -> list[str]:
+    return [m.group(1).strip() for m in _BARE_MODULE_RE.finditer(logs or "")]
+
+
+def _is_bare_package_name(module_name: str) -> bool:
+    return not (
+        module_name.startswith(".")
+        or module_name.startswith("/")
+        or module_name.startswith("@/")
+        or "/" in module_name and module_name.startswith(("src/", "app/", "lib/", "tests/"))
+    )
+
+
+def _changes_dependency_or_workflow(diagnosis: Diagnosis) -> bool:
+    manifest_names = {
+        "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+        "requirements.txt", "pyproject.toml", "poetry.lock", "Pipfile",
+        "go.mod", "go.sum", "Cargo.toml", "Cargo.lock", "Gemfile", "Gemfile.lock",
+    }
+    for file_change in diagnosis.files_changed:
+        path = file_change.path
+        if path in manifest_names or path.startswith(".github/workflows/"):
+            return True
+    return False
+
+
+def _extract_required_secrets(logs: str) -> list[str]:
+    ignored = {"CI", "NODE_ENV", "PORT", "RAILS_ENV"}
+    return [
+        match.group(1)
+        for match in _SECRET_RE.finditer(logs or "")
+        if match.group(1) not in ignored
+    ]
+
+
+def _extract_missing_docker_copy_path(logs: str) -> str | None:
+    recent_copy_path: str | None = None
+    for line in (logs or "").splitlines():
+        lower = line.lower()
+        copy_match = _DOCKER_COPY_SOURCE_RE.search(line)
+        if copy_match:
+            recent_copy_path = copy_match.group("path").strip()
+
+        if not any(marker in lower for marker in ("not found", "no such file", "failed", "does not exist")):
+            continue
+
+        for pattern in (_DOCKER_COPY_SOURCE_RE, _DOCKER_STAT_PATH_RE):
+            match = pattern.search(line)
+            if match:
+                return match.group("path").strip()
+        if recent_copy_path:
+            return recent_copy_path
+    return None
 
 
 INVESTIGATION_TOOLS = [
