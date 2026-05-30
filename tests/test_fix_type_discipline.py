@@ -40,36 +40,36 @@ def test_content_too_large_rejected():
         FileChange(path="ci.yml", new_content="x" * 200_001, explanation="fix")
 
 
-def test_safe_auto_apply_requires_files():
-    with pytest.raises(ValidationError):
-        Diagnosis(
-            problem_summary="Node version wrong" * 2,
-            root_cause="Node 12 is not available on ubuntu runners anymore " * 2,
-            fix_description="Update node version to 20 in the workflow file",
-            fix_type="safe_auto_apply",
-            confidence=0.95,
-            is_flaky_test=False,
-            files_changed=[],          # violation — safe_auto_apply needs files
-            category="workflow_config",
-            logs_truncated_warning=False,
-        )
+def test_safe_auto_apply_without_files_is_coerced_to_manual():
+    d = Diagnosis(
+        problem_summary="Node version wrong" * 2,
+        root_cause="Node 12 is not available on ubuntu runners anymore " * 2,
+        fix_description="Update node version to 20 in the workflow file",
+        fix_type="safe_auto_apply",
+        confidence=0.95,
+        is_flaky_test=False,
+        files_changed=[],
+        category="workflow_config",
+        logs_truncated_warning=False,
+    )
+    assert d.fix_type == "manual_required"
 
 
-def test_manual_required_forbids_files():
-    with pytest.raises(ValidationError):
-        Diagnosis(
-            problem_summary="Missing secret key in environment" * 1,
-            root_cause="The STRIPE_KEY env var is not set in GitHub Actions secrets " * 1,
-            fix_description="Add STRIPE_KEY to repository secrets",
-            fix_type="manual_required",
-            confidence=0.9,
-            is_flaky_test=False,
-            files_changed=[
-                FileChange(path="ci.yml", new_content="name: CI\n", explanation="wrong")
-            ],   # violation — manual_required must have empty files_changed
-            category="environment",
-            logs_truncated_warning=False,
-        )
+def test_manual_required_with_files_is_coerced_to_review():
+    d = Diagnosis(
+        problem_summary="Missing secret key in environment" * 1,
+        root_cause="The STRIPE_KEY env var is not set in GitHub Actions secrets " * 1,
+        fix_description="Add STRIPE_KEY to repository secrets",
+        fix_type="manual_required",
+        confidence=0.9,
+        is_flaky_test=False,
+        files_changed=[
+            FileChange(path="ci.yml", new_content="name: CI\n", explanation="wrong")
+        ],
+        category="environment",
+        logs_truncated_warning=False,
+    )
+    assert d.fix_type == "review_recommended"
 
 
 def test_confidence_out_of_range_rejected():

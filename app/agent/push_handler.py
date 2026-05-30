@@ -69,14 +69,14 @@ async def handle_push_event(payload: dict):
         investigation_context={
             "repo_full_name": repo_full_name,
             "access_token": access_token,
-            "default_branch": repo.get("default_branch", "main"),
+            "default_branch": commit_sha or repo.get("default_branch", "main"),
         },
     )
     await _materialize_patch_file_changes(
         diagnosis=diagnosis,
         repo_full_name=repo_full_name,
         access_token=access_token,
-        default_branch=repo.get("default_branch", "main"),
+        default_branch=commit_sha or repo.get("default_branch", "main"),
     )
 
     diagnosis_row = _store_push_diagnosis(ci_run_id, diagnosis)
@@ -92,6 +92,8 @@ async def handle_push_event(payload: dict):
         access_token=access_token,
         run_id=ci_run_id,
         diagnosis=diagnosis_row,
+        base_branch=branch or repo.get("default_branch", "main"),
+        base_sha=commit_sha or None,
     )
     supabase.table("ci_runs").update({
         "status": "fixed",

@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str = "HS256"
     jwt_expiry_hours: int = 168
+    token_encryption_key: str | None = None
+
+    # Webhooks / automation
+    webhook_rate_limit_max: int = 60
+    webhook_rate_limit_window_seconds: int = 3600
+    fix_branch_prefix: str = "prash/fix-run-"
 
     # URLs
     frontend_url: str = "http://localhost:3000"

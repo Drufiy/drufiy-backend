@@ -5,6 +5,7 @@ from jose import jwt
 
 from app.config import settings
 from app.db import supabase
+from app.token_crypto import get_github_token
 
 GITHUB_API = "https://api.github.com"
 
@@ -62,8 +63,4 @@ async def get_repo_access_token(repo: dict) -> str | None:
     user_id = repo.get("user_id")
     if not user_id:
         return None
-    result = supabase.rpc(
-        "get_decrypted_token",
-        {"p_user_id": user_id, "p_key": settings.jwt_secret},
-    ).execute()
-    return result.data or None
+    return get_github_token(user_id)

@@ -10,6 +10,7 @@ from app.config import settings
 from app.db import supabase
 from app.github_app import get_installation_token, github_app_enabled, list_installation_repos
 from app.notifier import notify_new_signup
+from app.token_crypto import get_github_token, store_github_token
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -105,10 +106,7 @@ async def github_callback(body: OAuthCallbackRequest):
 
     # Encrypt and store the GitHub access token
     try:
-        supabase.rpc(
-            "store_encrypted_token",
-            {"p_user_id": user_id, "p_token": access_token, "p_key": settings.jwt_secret},
-        ).execute()
+        store_github_token(user_id, access_token)
     except Exception as e:
         logger.warning(f"Failed to store encrypted token for user {user_id}: {e}")
 
@@ -136,15 +134,7 @@ async def check_scopes(current_user: dict = Depends(get_current_user)):
     Calls GET /user and reads the X-OAuth-Scopes response header from GitHub.
     """
     user_id = current_user["id"]
-    try:
-        result = supabase.rpc(
-            "get_decrypted_token",
-            {"p_user_id": user_id, "p_key": settings.jwt_secret},
-        ).execute()
-        access_token = result.data
-    except Exception as e:
-        logger.warning(f"Scope check: failed to decrypt token for user {user_id}: {e}")
-        return {"has_workflow_scope": False, "scopes": []}
+    access_token = get_github_token(user_id)
 
     if not access_token:
         return {"has_workflow_scope": False, "scopes": []}

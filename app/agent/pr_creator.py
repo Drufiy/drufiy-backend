@@ -24,6 +24,8 @@ async def create_fix_pr(
     access_token: str,
     run_id: str,
     diagnosis: dict,
+    base_branch: str | None = None,
+    base_sha: str | None = None,
 ) -> dict:
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -33,10 +35,11 @@ async def create_fix_pr(
 
     async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
         repo_info = await _get(client, f"{GITHUB_API}/repos/{repo_full_name}")
-        default_branch = repo_info["default_branch"]
+        target_branch = base_branch or repo_info["default_branch"]
 
-        ref_info = await _get(client, f"{GITHUB_API}/repos/{repo_full_name}/git/refs/heads/{default_branch}")
-        base_sha = ref_info["object"]["sha"]
+        if not base_sha:
+            ref_info = await _get(client, f"{GITHUB_API}/repos/{repo_full_name}/git/refs/heads/{target_branch}")
+            base_sha = ref_info["object"]["sha"]
 
         # Fetch commit blame — who broke it?
         blame_info = await _fetch_blame(client, repo_full_name, base_sha)
@@ -53,7 +56,7 @@ async def create_fix_pr(
                 "title": _pr_title(diagnosis),
                 "body": _pr_body(diagnosis, branch_name, blame_info),
                 "head": branch_name,
-                "base": default_branch,
+                "base": target_branch,
                 "maintainer_can_modify": True,
             },
         )
@@ -96,7 +99,8 @@ async def _fetch_blame(client, repo_full_name: str, commit_sha: str) -> dict | N
 async def _create_branch(client, repo_full_name, run_id, base_sha) -> str:
     prefix = run_id[:8]
     for attempt in range(2):
-        branch = f"drufiy/fix-run-{prefix}" if attempt == 0 else f"drufiy/fix-run-{prefix}-{int(datetime.now().timestamp())}"
+        base_prefix = settings.fix_branch_prefix
+        branch = f"{base_prefix}{prefix}" if attempt == 0 else f"{base_prefix}{prefix}-{int(datetime.now().timestamp())}"
         resp = await client.post(
             f"{GITHUB_API}/repos/{repo_full_name}/git/refs",
             json={"ref": f"refs/heads/{branch}", "sha": base_sha},
@@ -195,9 +199,13 @@ def apply_unified_patch(current_content: str, patch_text: str) -> str:
         while i < len(patch_lines) and not patch_lines[i].startswith("@@"):
             hunk_line = patch_lines[i]
             if hunk_line.startswith(" "):
+                if original_index >= len(original_lines) or original_lines[original_index] != hunk_line[1:]:
+                    raise PRCreationError("Unified diff context does not match current file")
                 output.append(original_lines[original_index])
                 original_index += 1
             elif hunk_line.startswith("-"):
+                if original_index >= len(original_lines) or original_lines[original_index] != hunk_line[1:]:
+                    raise PRCreationError("Unified diff removal does not match current file")
                 original_index += 1
             elif hunk_line.startswith("+"):
                 output.append(hunk_line[1:])

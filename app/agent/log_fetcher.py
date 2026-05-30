@@ -7,6 +7,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 MAX_LOG_CHARS = 80_000
+MAX_LOG_ZIP_BYTES = 50_000_000
+MAX_EXTRACTED_LOG_BYTES = 5_000_000
 
 
 class LogFetchError(Exception):
@@ -51,6 +53,9 @@ async def fetch_workflow_logs(github_run_id: int, repo_full_name: str, access_to
 
 
 def _parse_zip_logs(zip_bytes: bytes) -> str:
+    if len(zip_bytes) > MAX_LOG_ZIP_BYTES:
+        raise LogsParseError("Log ZIP is too large to process safely")
+
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile as e:
@@ -63,6 +68,10 @@ def _parse_zip_logs(zip_bytes: bytes) -> str:
     parts = []
     for fname in txt_files:
         try:
+            info = zf.getinfo(fname)
+            if info.file_size > MAX_EXTRACTED_LOG_BYTES:
+                logger.warning(f"Skipping oversized log file {fname} ({info.file_size} bytes)")
+                continue
             content = zf.read(fname).decode("utf-8", errors="replace")
             parts.append(f"\n\n=== {fname} ===\n{content}")
         except Exception as e:

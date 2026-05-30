@@ -20,4 +20,4 @@ EXPOSE 8080
 
 # Run the application using Uvicorn
 # Use PORT environment variable for Cloud Run compatibility (shell form for env var expansion)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 2"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080} --workers 1"]

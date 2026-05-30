@@ -22,6 +22,7 @@ from app.config import settings
 from app.db import supabase
 from app.github_app import get_repo_access_token
 from app.notifier import notify_diagnosis_failed, notify_exhausted
+from app.token_crypto import get_github_token
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
@@ -67,6 +68,7 @@ async def process_failure(ci_run_id: str):
         commit_sha = ci_run.get("commit_sha") or ""
         commit_message = ci_run.get("commit_message") or ""
         workflow_name = ci_run.get("github_workflow_name") or "CI"
+        source_ref = commit_sha or ci_run.get("branch") or repo.get("default_branch", "main")
 
         # ── 2. Decrypt GitHub token ──────────────────────────────────────────
         access_token = await get_repo_access_token(repo)
@@ -107,7 +109,7 @@ async def process_failure(ci_run_id: str):
             logs=logs,
             repo_full_name=repo_full_name,
             access_token=access_token,
-            default_branch=repo.get("default_branch", "main"),
+            default_branch=source_ref,
             workflow_name=workflow_name,
         )
 
@@ -131,14 +133,14 @@ async def process_failure(ci_run_id: str):
                 investigation_context={
                     "repo_full_name": repo_full_name,
                     "access_token": access_token,
-                    "default_branch": repo.get("default_branch", "main"),
+                    "default_branch": source_ref,
                 },
             )
             await _materialize_patch_file_changes(
                 diagnosis=diagnosis,
                 repo_full_name=repo_full_name,
                 access_token=access_token,
-                default_branch=repo.get("default_branch", "main"),
+                default_branch=source_ref,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
@@ -174,10 +176,12 @@ async def process_failure(ci_run_id: str):
                 ci_run_id=ci_run_id,
                 repo_full_name=repo_full_name,
                 access_token=access_token,
-                default_branch=repo.get("default_branch", "main"),
+                default_branch=source_ref,
                 diagnosis=diagnosis,
                 diagnosis_row=diagnosis_row,
                 logs=logs,
+                base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
+                base_sha=commit_sha or None,
             )
             if skipped:
                 return
@@ -185,11 +189,20 @@ async def process_failure(ci_run_id: str):
         # ── 7. Auto-apply if safe ────────────────────────────────────────────
         if diagnosis.fix_type == "safe_auto_apply" and not diagnosis.is_flaky_test:
             # Deduplication: skip if there's already an open Drufiy PR for this repo
-            if await _has_open_drufiy_pr(repo_full_name, access_token):
+            if await _has_open_drufiy_pr(repo_full_name, access_token, ci_run_id):
                 logger.info(f"Skipping PR for run {ci_run_id} — existing open Drufiy PR found for {repo_full_name}")
             else:
                 logger.info(f"safe_auto_apply — creating fix PR for run {ci_run_id}")
-                await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
+                await _apply_fix(
+                    ci_run_id,
+                    repo_full_name,
+                    access_token,
+                    repo["id"],
+                    diagnosis_row,
+                    diagnosis,
+                    base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
+                    base_sha=commit_sha or None,
+                )
         else:
             logger.info(f"Fix type '{diagnosis.fix_type}' — waiting for user action on run {ci_run_id}")
 
@@ -217,6 +230,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         commit_sha = ci_run.get("commit_sha") or ""
         commit_message = ci_run.get("commit_message") or ""
         workflow_name = ci_run.get("github_workflow_name") or "CI"
+        source_ref = ci_run.get("fix_branch_name") or commit_sha or ci_run.get("branch") or repo.get("default_branch", "main")
 
         if not new_logs:
             await _mark_failed(ci_run_id, "exhausted", f"Iteration {next_iteration} had no logs to diagnose")
@@ -236,7 +250,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 logs=new_logs,
                 repo_full_name=repo_full_name,
                 access_token=access_token_iter2,
-                default_branch=repo.get("default_branch", "main"),
+                default_branch=source_ref,
                 workflow_name=workflow_name,
             )
 
@@ -260,14 +274,14 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 investigation_context={
                     "repo_full_name": repo_full_name,
                     "access_token": access_token_iter2,
-                    "default_branch": repo.get("default_branch", "main"),
+                    "default_branch": source_ref,
                 },
             )
             await _materialize_patch_file_changes(
                 diagnosis=diagnosis,
                 repo_full_name=repo_full_name,
                 access_token=access_token_iter2,
-                default_branch=repo.get("default_branch", "main"),
+                default_branch=source_ref,
             )
         except DiagnosisValidationError as e:
             logger.error(f"Iteration {next_iteration} diagnosis failed for run {ci_run_id}: {e}")
@@ -286,7 +300,16 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         ):
             access_token = await get_repo_access_token(repo)
             if access_token:
-                await _apply_fix(ci_run_id, repo_full_name, access_token, repo["id"], diagnosis_row, diagnosis)
+                await _apply_fix(
+                    ci_run_id,
+                    repo_full_name,
+                    access_token,
+                    repo["id"],
+                    diagnosis_row,
+                    diagnosis,
+                    base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
+                    base_sha=None,
+                )
 
     except Exception as e:
         logger.exception(f"process_iteration_2 crashed run_id={ci_run_id}: {e}")
@@ -617,6 +640,8 @@ async def _auto_skip_test(
     diagnosis,
     diagnosis_row: dict,
     logs: str,
+    base_branch: str | None = None,
+    base_sha: str | None = None,
 ) -> bool:
     """Create a PR that skips the flaky test after a rerun still fails."""
     target = _infer_test_target(diagnosis.problem_summary, logs)
@@ -658,6 +683,8 @@ async def _auto_skip_test(
             access_token=access_token,
             run_id=ci_run_id,
             diagnosis=skip_diagnosis,
+            base_branch=base_branch,
+            base_sha=base_sha,
         )
     except PRCreationError as e:
         logger.error(f"Auto skip-test PR creation failed for run {ci_run_id}: {e}")
@@ -846,7 +873,7 @@ def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:
         runs_resp = (
             supabase.table("ci_runs")
             .select("id")
-            .eq("connected_repo_id", repo_id)
+            .eq("repo_id", repo_id)
             .execute()
         )
         run_ids = [r["id"] for r in (runs_resp.data or [])]
@@ -876,7 +903,7 @@ def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
-async def _has_open_drufiy_pr(repo_full_name: str, access_token: str) -> bool:
+async def _has_open_drufiy_pr(repo_full_name: str, access_token: str, ci_run_id: str) -> bool:
     """
     Check if there's already an open PR from Drufiy for this repo.
     Prevents duplicate PRs when multiple CI runs fail for the same issue.
@@ -897,12 +924,18 @@ async def _has_open_drufiy_pr(repo_full_name: str, access_token: str) -> bool:
                 return False
             for pr in resp.json():
                 head_ref = pr.get("head", {}).get("ref", "")
-                if head_ref.startswith("drufiy/fix-run-"):
+                if _is_fix_branch_for_run(head_ref, ci_run_id):
                     logger.info(f"Dedup: found open Drufiy PR #{pr['number']} ({head_ref}) for {repo_full_name}")
                     return True
     except Exception as e:
         logger.warning(f"Dedup check failed for {repo_full_name}: {e}")
     return False
+
+
+def _is_fix_branch_for_run(branch: str, ci_run_id: str) -> bool:
+    run_prefix = ci_run_id[:8]
+    prefixes = {settings.fix_branch_prefix, "drufiy/fix-run-", "prash/fix-run-"}
+    return any(branch.startswith(f"{prefix}{run_prefix}") for prefix in prefixes)
 
 
 def _load_run_and_repo(ci_run_id: str):
@@ -925,15 +958,7 @@ def _load_run_and_repo(ci_run_id: str):
 
 
 def _get_access_token(user_id: str) -> str | None:
-    try:
-        result = supabase.rpc(
-            "get_decrypted_token",
-            {"p_user_id": user_id, "p_key": settings.jwt_secret},
-        ).execute()
-        return result.data or None
-    except Exception as e:
-        logger.error(f"Failed to decrypt token for user {user_id}: {e}")
-        return None
+    return get_github_token(user_id)
 
 
 def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
@@ -956,7 +981,16 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
     return result.data[0] if result.data else row
 
 
-async def _apply_fix(ci_run_id: str, repo_full_name: str, access_token: str, repo_id: str, diagnosis_row: dict, diagnosis):
+async def _apply_fix(
+    ci_run_id: str,
+    repo_full_name: str,
+    access_token: str,
+    repo_id: str,
+    diagnosis_row: dict,
+    diagnosis,
+    base_branch: str | None = None,
+    base_sha: str | None = None,
+):
     """Create the fix PR and update ci_run + diagnoses tables."""
     _update_status(ci_run_id, "applying")
 
@@ -998,6 +1032,8 @@ async def _apply_fix(ci_run_id: str, repo_full_name: str, access_token: str, rep
             access_token=access_token,
             run_id=ci_run_id,
             diagnosis=diagnosis_row,
+            base_branch=base_branch,
+            base_sha=base_sha,
         )
     except PRCreationError as e:
         logger.error(f"PR creation failed for run {ci_run_id}: {e}")

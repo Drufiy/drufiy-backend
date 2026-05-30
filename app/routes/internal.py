@@ -38,7 +38,7 @@ def _build_weekly_stats(since_iso: str) -> list[dict]:
     """
     runs_resp = (
         supabase.table("ci_runs")
-        .select("id, status, created_at, connected_repo_id, connected_repos(repo_full_name, user_id)")
+        .select("id, status, created_at, repo_id, connected_repos(repo_full_name, user_id)")
         .gte("created_at", since_iso)
         .execute()
     )

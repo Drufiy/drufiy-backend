@@ -103,26 +103,26 @@ def test_root_cause_too_short_rejected():
         Diagnosis(**_valid_diag(root_cause="short"))
 
 
-def test_safe_auto_apply_with_no_files_rejected():
-    with pytest.raises(ValidationError):
-        Diagnosis(**_valid_diag(fix_type="safe_auto_apply", files_changed=[]))
+def test_safe_auto_apply_with_no_files_coerced():
+    d = Diagnosis(**_valid_diag(fix_type="safe_auto_apply", files_changed=[]))
+    assert d.fix_type == "manual_required"
 
 
-def test_manual_required_with_files_rejected():
-    with pytest.raises(ValidationError):
-        Diagnosis(**_valid_diag(
-            fix_type="manual_required",
-            files_changed=[FileChange(
-                path="package.json",
-                new_content='{"a": 1}',
-                explanation="should not be here",
-            )],
-        ))
+def test_manual_required_with_files_coerced():
+    d = Diagnosis(**_valid_diag(
+        fix_type="manual_required",
+        files_changed=[FileChange(
+            path="package.json",
+            new_content='{"a": 1}',
+            explanation="should not be here",
+        )],
+    ))
+    assert d.fix_type == "review_recommended"
 
 
-def test_review_recommended_with_no_files_rejected():
-    with pytest.raises(ValidationError):
-        Diagnosis(**_valid_diag(fix_type="review_recommended", files_changed=[]))
+def test_review_recommended_with_no_files_coerced():
+    d = Diagnosis(**_valid_diag(fix_type="review_recommended", files_changed=[]))
+    assert d.fix_type == "manual_required"
 
 
 def test_flaky_test_flag_no_business_logic_enforced_by_schema():

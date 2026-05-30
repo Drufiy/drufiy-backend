@@ -22,23 +22,17 @@ from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_repo_access_token
+from app.token_crypto import get_github_token
 
 logger = logging.getLogger(__name__)
+FIX_BRANCH_PREFIXES = tuple(dict.fromkeys((settings.fix_branch_prefix, "drufiy/fix-run-", "prash/fix-run-")))
 
 # Simple in-process lock — prevents concurrent reconcile runs overlapping.
 _reconciling = False
 
 
 async def _get_decrypted_token(user_id: str) -> str | None:
-    try:
-        result = supabase.rpc(
-            "get_decrypted_token",
-            {"p_user_id": user_id, "p_key": settings.jwt_secret},
-        ).execute()
-        return result.data or None
-    except Exception as e:
-        logger.warning(f"Reconciler: failed to decrypt token for user {user_id}: {e}")
-        return None
+    return get_github_token(user_id)
 
 
 async def reconcile_stuck_verifications() -> int:
@@ -90,25 +84,15 @@ async def _reconcile_one(ci_run: dict) -> int:
     # Query GitHub for all recent runs, filter client-side by fix branch
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"https://api.github.com/repos/{repo_full_name}/actions/runs",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                params={"per_page": 50},
-            )
-        if resp.status_code != 200:
-            logger.warning(f"Reconciler: GitHub API {resp.status_code} for {repo_full_name}")
-            return 0
+            all_runs_raw = await _fetch_recent_workflow_runs(client, repo_full_name, access_token)
     except Exception as e:
         logger.warning(f"Reconciler: GitHub request failed for {ci_run_id[:8]}: {e}")
         return 0
 
     all_runs = [
-        r for r in resp.json().get("workflow_runs", [])
+        r for r in all_runs_raw
         if r.get("head_branch") == fix_branch
+        and r.get("head_sha") != ci_run.get("commit_sha")
     ]
     completed = [r for r in all_runs if r.get("status") == "completed"]
 
@@ -322,7 +306,7 @@ async def _find_existing_fix_pr(ci_run_id: str, repo_full_name: str, access_toke
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    branch_prefix = f"drufiy/fix-run-{ci_run_id[:8]}"
+    branch_prefixes = [f"{prefix}{ci_run_id[:8]}" for prefix in FIX_BRANCH_PREFIXES]
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -341,9 +325,37 @@ async def _find_existing_fix_pr(ci_run_id: str, repo_full_name: str, access_toke
 
     for pr in resp.json():
         head_ref = ((pr.get("head") or {}).get("ref")) or ""
-        if head_ref.startswith(branch_prefix):
+        if any(head_ref.startswith(prefix) for prefix in branch_prefixes):
             return pr
     return None
+
+
+async def _fetch_recent_workflow_runs(
+    client: httpx.AsyncClient,
+    repo_full_name: str,
+    access_token: str,
+    max_pages: int = 5,
+) -> list[dict]:
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    runs: list[dict] = []
+    for page in range(1, max_pages + 1):
+        resp = await client.get(
+            f"https://api.github.com/repos/{repo_full_name}/actions/runs",
+            headers=headers,
+            params={"per_page": 100, "page": page},
+        )
+        if resp.status_code != 200:
+            logger.warning(f"Reconciler: GitHub API {resp.status_code} for {repo_full_name}")
+            break
+        batch = resp.json().get("workflow_runs", [])
+        runs.extend(batch)
+        if len(batch) < 100:
+            break
+    return runs
 
 
 def _update_known_good_files(ci_run: dict, repo_id: str):

@@ -374,6 +374,8 @@ async def apply_fix(run_id: str, current_user: dict = Depends(get_current_user))
             access_token=token,
             run_id=run_id,
             diagnosis=diagnosis,
+            base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
+            base_sha=ci_run.get("commit_sha") or None,
         )
     except Exception as e:
         supabase.table("ci_runs").update({
@@ -482,7 +484,8 @@ async def dry_run(run_id: str, current_user: dict = Depends(get_current_user)):
 
 async def _run_force_fix(run_id: str, access_token: str):
     """Background task: re-diagnose with force_fix=True, then open a PR."""
-    from app.agent.diagnosis_agent import diagnose_failure, DiagnosisValidationError
+    from app.agent.diagnosis_agent import diagnose_failure
+    from app.agent.kimi_client import DiagnosisValidationError
     from app.agent.log_fetcher import fetch_workflow_logs
     from app.agent.processor import _materialize_patch_file_changes
     from app.agent.pr_creator import create_fix_pr
@@ -558,6 +561,8 @@ async def _run_force_fix(run_id: str, access_token: str):
             access_token=access_token,
             run_id=run_id,
             diagnosis=diagnosis.model_dump(),
+            base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
+            base_sha=ci_run.get("commit_sha") or None,
         )
         supabase.table("ci_runs").update({
             "status": "fixed",
@@ -815,6 +820,8 @@ async def skip_test(
             access_token=access_token,
             run_id=run_id,
             diagnosis=skip_diagnosis,
+            base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
+            base_sha=ci_run.get("commit_sha") or None,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "pr_failed", "detail": str(e)})

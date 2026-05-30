@@ -4,6 +4,7 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import settings
 from app.db import supabase
+from app.token_crypto import get_github_token
 
 security = HTTPBearer()
 
@@ -42,14 +43,9 @@ async def get_current_user(
     if not result.data:
         raise HTTPException(status_code=401, detail="User not found")
 
-    # Decrypt GitHub access token via RPC
-    token_result = supabase.rpc(
-        "get_decrypted_token", {"p_user_id": user_id, "p_key": settings.jwt_secret}
-    ).execute()
-
     return {
         "id": result.data["id"],
         "github_username": result.data["github_username"],
         "email": result.data.get("email"),
-        "github_access_token": token_result.data,
+        "github_access_token": get_github_token(user_id),
     }

@@ -33,9 +33,11 @@ CREATE TABLE IF NOT EXISTS public.connected_repos (
   default_branch TEXT DEFAULT 'main',
   webhook_id BIGINT NOT NULL,
   is_active BOOLEAN DEFAULT true,
+  auto_merge BOOLEAN DEFAULT false,
   rate_limit_window_start TIMESTAMPTZ DEFAULT now(),
   rate_limit_count INT DEFAULT 0,
-  created_at TIMESTAMPTZ DEFAULT now()
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_connected_repos_user_id ON public.connected_repos(user_id);
@@ -93,6 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_ci_runs_github_run_id ON public.ci_runs(github_ru
 CREATE INDEX IF NOT EXISTS idx_ci_runs_commit_sha ON public.ci_runs(commit_sha);
 CREATE INDEX IF NOT EXISTS idx_ci_runs_status ON public.ci_runs(status);
 CREATE INDEX IF NOT EXISTS idx_ci_runs_fix_branch ON public.ci_runs(fix_branch_name) WHERE fix_branch_name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_runs_repo_commit_run_unique ON public.ci_runs(repo_id, commit_sha, github_run_id);
 
 -- =========================================================================
 -- AI diagnoses
@@ -100,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_ci_runs_fix_branch ON public.ci_runs(fix_branch_n
 CREATE TABLE IF NOT EXISTS public.diagnoses (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   run_id UUID REFERENCES public.ci_runs(id) ON DELETE CASCADE NOT NULL,
-  iteration INT DEFAULT 1 CHECK (iteration IN (1, 2)),
+  iteration INT DEFAULT 1 CHECK (iteration BETWEEN 1 AND 4),
   problem_summary TEXT NOT NULL,
   root_cause TEXT NOT NULL,
   fix_description TEXT NOT NULL,
@@ -109,6 +112,7 @@ CREATE TABLE IF NOT EXISTS public.diagnoses (
   is_flaky_test BOOLEAN DEFAULT false,
   category TEXT,
   logs_truncated_warning BOOLEAN DEFAULT false,
+  speculative BOOLEAN DEFAULT false,
   required_secrets JSONB DEFAULT '[]'::jsonb,
   files_changed JSONB,
   github_pr_url TEXT,

@@ -17,7 +17,9 @@ from app.notifier import notify_verified
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-FIX_BRANCH_PREFIX = "drufiy/fix-run-"
+FIX_BRANCH_PREFIX = settings.fix_branch_prefix
+LEGACY_FIX_BRANCH_PREFIXES = ("drufiy/fix-run-", "prash/fix-run-")
+FIX_BRANCH_PREFIXES = tuple(dict.fromkeys((FIX_BRANCH_PREFIX, *LEGACY_FIX_BRANCH_PREFIXES)))
 
 
 # ── HMAC verification ────────────────────────────────────────────────────────
@@ -38,13 +40,57 @@ def _check_rate_limit(repo_id: str) -> bool:
     try:
         result = supabase.rpc(
             "check_and_increment_webhook_rate_limit",
-            {"p_repo_id": repo_id, "p_max": 10, "p_window_seconds": 3600},
+            {
+                "p_repo_id": repo_id,
+                "p_max": settings.webhook_rate_limit_max,
+                "p_window_seconds": settings.webhook_rate_limit_window_seconds,
+            },
         ).execute()
         data = result.data or {}
         return data.get("allowed", True)
     except Exception as e:
         logger.warning(f"Rate limit RPC failed, allowing through: {e}")
         return True
+
+
+def _is_fix_branch(branch: str) -> bool:
+    return any(branch.startswith(prefix) for prefix in FIX_BRANCH_PREFIXES)
+
+
+def _strip_fix_branch_prefix(branch: str) -> str:
+    for prefix in FIX_BRANCH_PREFIXES:
+        if branch.startswith(prefix):
+            return branch[len(prefix):]
+    return branch
+
+
+async def _fetch_recent_workflow_runs(
+    client: httpx.AsyncClient,
+    repo_full_name: str,
+    access_token: str,
+    max_pages: int = 5,
+) -> list[dict]:
+    """Fetch recent Actions runs with pagination; GitHub branch filtering is unreliable for PR runs."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    runs: list[dict] = []
+    for page in range(1, max_pages + 1):
+        resp = await client.get(
+            f"https://api.github.com/repos/{repo_full_name}/actions/runs",
+            headers=headers,
+            params={"per_page": 100, "page": page},
+        )
+        if resp.status_code != 200:
+            logger.warning(f"Could not fetch workflow runs for {repo_full_name}: {resp.status_code}")
+            break
+        batch = resp.json().get("workflow_runs", [])
+        runs.extend(batch)
+        if len(batch) < 100:
+            break
+    return runs
 
 
 # ── Verification event handler (runs as background task) ─────────────────────
@@ -59,7 +105,7 @@ async def handle_verification_event(payload: dict):
     workflow_name = workflow_run.get("name", "")
 
     # Parse run_id prefix from branch name: drufiy/fix-run-{prefix} or drufiy/fix-run-{prefix}-{ts}
-    prefix_part = branch.replace(FIX_BRANCH_PREFIX, "")
+    prefix_part = _strip_fix_branch_prefix(branch)
     run_id_prefix = prefix_part[:8]
 
     ci_run_result = (
@@ -120,22 +166,7 @@ async def handle_verification_event(payload: dict):
             return
 
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"https://api.github.com/repos/{repo_full_name}/actions/runs",
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/vnd.github+json",
-                    "X-GitHub-Api-Version": "2022-11-28",
-                },
-                # NOTE: GitHub's `branch` filter silently returns 0 for pull_request-triggered
-                # runs. Fetch broadly and filter client-side by head_branch instead.
-                params={"per_page": 50},
-            )
-        if resp.status_code != 200:
-            logger.warning(f"Could not fetch workflow runs for branch {branch}: {resp.status_code}")
-            return
-
-        all_runs_raw = resp.json().get("workflow_runs", [])
+            all_runs_raw = await _fetch_recent_workflow_runs(client, repo_full_name, access_token)
         # Filter client-side by head_branch — works for both push and pull_request events.
         # Also exclude CI runs on the original bad commit SHA: when Prash creates a fix branch
         # via the API, GitHub fires a push event on the base (still-broken) commit before the
@@ -226,7 +257,7 @@ async def handle_verification_event(payload: dict):
             }).eq("id", ci_run_id).execute()
 
             # Fetch logs from the failed run on the fix branch
-            failed_run = next((r for r in all_runs if r.get("conclusion") != "success"), None)
+            failed_run = next((r for r in completed_runs if r.get("conclusion") != "success"), None)
             new_logs = ""
             if failed_run:
                 try:
@@ -378,7 +409,7 @@ async def github_webhook(
     branch = workflow_run.get("head_branch") or ""
 
     # Verification events: any completed event on our fix branches
-    if action == "completed" and branch.startswith(FIX_BRANCH_PREFIX):
+    if action == "completed" and _is_fix_branch(branch):
         background_tasks.add_task(handle_verification_event, payload)
         return {"status": "verification_queued"}
 
@@ -402,10 +433,6 @@ async def github_webhook(
 
     repo = repo_result.data[0]
 
-    if not _check_rate_limit(repo["id"]):
-        logger.warning(f"Rate limit hit for repo {repo_full_name}")
-        return {"status": "rate_limited"}
-
     commit_sha = workflow_run.get("head_sha", "")
     commit_message = (workflow_run.get("head_commit") or {}).get("message", "")
     github_run_id = workflow_run["id"]
@@ -428,12 +455,16 @@ async def github_webhook(
         )
         return {"status": "duplicate_ignored", "ci_run_id": existing.data[0]["id"]}
 
+    if not _check_rate_limit(repo["id"]):
+        logger.warning(f"Rate limit hit for repo {repo_full_name}")
+        return {"status": "rate_limited"}
+
     # ── M-4: Skip merge commits from Drufiy PRs ───────────────────────────────
     # When a Drufiy fix PR is merged, GitHub fires a new workflow_run on the merge
     # commit. Without this guard, Prash would try to "fix" its own fix. Detect by:
     # 1. Commit message starts with "Merge" and contains "drufiy/fix-run-"
     # 2. OR: the commit_sha matches the head of a recently-verified/fixed run
-    if FIX_BRANCH_PREFIX in commit_message and commit_message.strip().startswith("Merge"):
+    if any(prefix in commit_message for prefix in FIX_BRANCH_PREFIXES) and commit_message.strip().startswith("Merge"):
         logger.info(
             f"Skipping merge commit of Drufiy PR — repo={repo_full_name} "
             f"sha={commit_sha[:8]} msg={commit_message[:80]!r}"
@@ -459,18 +490,31 @@ async def github_webhook(
         return {"status": "recent_fix_sha_ignored"}
 
     # Insert ci_run row (commit_sha, commit_message, github_run_id already extracted above)
-    insert = supabase.table("ci_runs").insert({
-        "repo_id": repo["id"],
-        "github_run_id": github_run_id,
-        "github_workflow_id": workflow_run.get("workflow_id"),
-        "github_workflow_name": workflow_run.get("name"),
-        "run_name": workflow_run.get("display_title") or workflow_run.get("name"),
-        "branch": branch,
-        "commit_sha": commit_sha,
-        "commit_message": commit_message,
-        "status": "pending",
-        "logs_url": workflow_run.get("logs_url"),
-    }).execute()
+    try:
+        insert = supabase.table("ci_runs").insert({
+            "repo_id": repo["id"],
+            "github_run_id": github_run_id,
+            "github_workflow_id": workflow_run.get("workflow_id"),
+            "github_workflow_name": workflow_run.get("name"),
+            "run_name": workflow_run.get("display_title") or workflow_run.get("name"),
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "commit_message": commit_message,
+            "status": "pending",
+            "logs_url": workflow_run.get("logs_url"),
+        }).execute()
+    except Exception as e:
+        logger.warning(f"ci_run insert raced or failed for GitHub run {github_run_id}: {e}")
+        existing = (
+            supabase.table("ci_runs")
+            .select("id")
+            .eq("github_run_id", github_run_id)
+            .limit(1)
+            .execute()
+        )
+        if existing.data:
+            return {"status": "duplicate_ignored", "ci_run_id": existing.data[0]["id"]}
+        raise
 
     if not insert.data:
         logger.error(f"Failed to insert ci_run for run {workflow_run['id']}")
