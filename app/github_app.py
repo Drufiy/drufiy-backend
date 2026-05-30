@@ -14,6 +14,13 @@ def github_app_enabled() -> bool:
     return bool(settings.github_app_id and settings.github_app_private_key)
 
 
+def _github_app_private_key() -> str:
+    key = settings.github_app_private_key or ""
+    if "\\n" in key:
+        key = key.replace("\\n", "\n")
+    return key.strip()
+
+
 def create_github_app_jwt() -> str:
     if not github_app_enabled():
         raise ValueError("GitHub App credentials are not configured")
@@ -23,7 +30,7 @@ def create_github_app_jwt() -> str:
         "exp": int((now + timedelta(minutes=9)).timestamp()),
         "iss": settings.github_app_id,
     }
-    return jwt.encode(payload, settings.github_app_private_key, algorithm="RS256")
+    return jwt.encode(payload, _github_app_private_key(), algorithm="RS256")
 
 
 async def get_installation_token(installation_id: int) -> str:
