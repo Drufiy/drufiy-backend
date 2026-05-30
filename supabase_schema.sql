@@ -20,6 +20,15 @@ CREATE TABLE IF NOT EXISTS public.user_profiles (
 
 CREATE INDEX IF NOT EXISTS idx_user_profiles_github_user_id ON public.user_profiles(github_user_id);
 
+CREATE TABLE IF NOT EXISTS public.jwt_revocations (
+  jti TEXT PRIMARY KEY,
+  user_id UUID REFERENCES public.user_profiles(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires_at ON public.jwt_revocations(expires_at);
+
 -- =========================================================================
 -- Connected GitHub repos
 -- =========================================================================
@@ -159,6 +168,7 @@ ALTER TABLE public.diagnoses REPLICA IDENTITY FULL;
 -- Row Level Security (backend uses service_role key — bypasses RLS)
 -- =========================================================================
 ALTER TABLE public.user_profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.jwt_revocations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.connected_repos ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.ci_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.diagnoses ENABLE ROW LEVEL SECURITY;
@@ -221,5 +231,23 @@ BEGIN
   SET rate_limit_count = rate_limit_count + 1
   WHERE id = p_repo_id;
   RETURN json_build_object('allowed', true, 'count', v_count + 1);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION append_verification_workflow(
+  p_run_id UUID,
+  p_entry JSONB
+) RETURNS JSONB AS $$
+DECLARE
+  v_result JSONB;
+BEGIN
+  UPDATE public.ci_runs
+  SET verification_checked_workflows =
+        COALESCE(verification_checked_workflows, '[]'::jsonb) || jsonb_build_array(p_entry),
+      updated_at = now()
+  WHERE id = p_run_id
+  RETURNING verification_checked_workflows INTO v_result;
+
+  RETURN v_result;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;

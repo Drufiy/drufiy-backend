@@ -1,6 +1,13 @@
 import pytest
 
-from app.agent.pr_creator import PRCreationError, _create_branch, apply_unified_patch
+from app.agent.pr_creator import (
+    AuthError,
+    PRCreationError,
+    _create_branch,
+    _pr_title,
+    _raise_github_error,
+    apply_unified_patch,
+)
 from app.agent.processor import _is_fix_branch_for_run
 from app.webhook import _is_fix_branch, _strip_fix_branch_prefix
 
@@ -56,3 +63,20 @@ def test_unified_patch_rejects_context_mismatch():
     patch = "@@ -1,3 +1,3 @@\n one\n-wrong\n+TWO\n three\n"
     with pytest.raises(PRCreationError, match="does not match"):
         apply_unified_patch(current, patch)
+
+
+def test_github_401_is_auth_error():
+    resp = _Resp(status_code=401, text="bad credentials")
+    with pytest.raises(AuthError, match="invalid or expired"):
+        _raise_github_error(resp, "commit file")
+
+
+def test_github_rate_limit_is_actionable_error():
+    resp = _Resp(status_code=403, text="API rate limit exceeded")
+    with pytest.raises(PRCreationError, match="rate limit exceeded"):
+        _raise_github_error(resp, "commit file")
+
+
+def test_speculative_pr_title_is_tagged():
+    title = _pr_title({"speculative": True, "problem_summary": "CI dependency failure"})
+    assert title.startswith("[SPECULATIVE] fix: CI dependency failure")

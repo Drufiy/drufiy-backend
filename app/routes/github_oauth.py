@@ -1,11 +1,15 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from secrets import token_urlsafe
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
+from jose import JWTError, jwt
 from pydantic import BaseModel
 
-from app.auth import create_access_token, get_current_user
+from app.auth import create_access_token, get_current_user, revoke_access_token, security
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_installation_token, github_app_enabled, list_installation_repos
@@ -19,12 +23,67 @@ router = APIRouter()
 class OAuthCallbackRequest(BaseModel):
     code: str
     redirect_uri: str | None = None  # frontend passes its own origin so exchange matches
+    state: str | None = None
+
+
+class OAuthLoginUrlRequest(BaseModel):
+    redirect_uri: str | None = None
+
+
+def _create_oauth_state() -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "typ": "github_oauth_state",
+        "nonce": token_urlsafe(24),
+        "iat": now,
+        "exp": now + timedelta(minutes=settings.oauth_state_expiry_minutes),
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def _validate_oauth_state(state: str) -> None:
+    try:
+        payload = jwt.decode(state, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    except JWTError:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_oauth_state", "message": "OAuth state is invalid or expired"},
+        )
+    if payload.get("typ") != "github_oauth_state" or not payload.get("nonce"):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "invalid_oauth_state", "message": "OAuth state is malformed"},
+        )
 
 
 # ── GitHub OAuth callback ────────────────────────────────────────────────────
 
+@router.post("/github/login-url")
+async def github_login_url(body: OAuthLoginUrlRequest | None = None):
+    state = _create_oauth_state()
+    params = {
+        "client_id": settings.github_client_id,
+        "scope": "repo admin:repo_hook workflow",
+        "state": state,
+    }
+    if body and body.redirect_uri:
+        params["redirect_uri"] = body.redirect_uri
+    return {
+        "url": f"https://github.com/login/oauth/authorize?{urlencode(params)}",
+        "state": state,
+        "expires_in_seconds": settings.oauth_state_expiry_minutes * 60,
+    }
+
 @router.post("/github/callback")
 async def github_callback(body: OAuthCallbackRequest):
+    if body.state:
+        _validate_oauth_state(body.state)
+    elif settings.oauth_state_required:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "missing_oauth_state", "message": "OAuth state is required"},
+        )
+
     exchange_payload: dict = {
         "client_id": settings.github_client_id,
         "client_secret": settings.github_client_secret,
@@ -160,8 +219,12 @@ async def check_scopes(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout():
-    return {"success": True}
+async def logout(
+    current_user: dict = Depends(get_current_user),
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+):
+    revoked = revoke_access_token(credentials.credentials, user_id=current_user["id"])
+    return {"success": True, "revoked": revoked}
 
 
 @router.get("/github-app/install-url")

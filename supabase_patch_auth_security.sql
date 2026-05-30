@@ -1,0 +1,45 @@
+-- Milestone 3 auth/security patch.
+-- Run in Supabase SQL Editor to enable JWT logout revocation.
+
+CREATE TABLE IF NOT EXISTS public.jwt_revocations (
+  jti TEXT PRIMARY KEY,
+  user_id UUID REFERENCES public.user_profiles(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  revoked_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_jwt_revocations_expires_at
+ON public.jwt_revocations(expires_at);
+
+ALTER TABLE public.jwt_revocations ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION prune_expired_jwt_revocations()
+RETURNS INTEGER AS $$
+DECLARE
+  v_deleted INTEGER;
+BEGIN
+  DELETE FROM public.jwt_revocations
+  WHERE expires_at < now();
+
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN COALESCE(v_deleted, 0);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION append_verification_workflow(
+  p_run_id UUID,
+  p_entry JSONB
+) RETURNS JSONB AS $$
+DECLARE
+  v_result JSONB;
+BEGIN
+  UPDATE public.ci_runs
+  SET verification_checked_workflows =
+        COALESCE(verification_checked_workflows, '[]'::jsonb) || jsonb_build_array(p_entry),
+      updated_at = now()
+  WHERE id = p_run_id
+  RETURNING verification_checked_workflows INTO v_result;
+
+  RETURN v_result;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;

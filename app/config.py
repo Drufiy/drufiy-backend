@@ -33,6 +33,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_hours: int = 168
     token_encryption_key: str | None = None
+    oauth_state_required: bool = False
+    oauth_state_expiry_minutes: int = 15
 
     # Webhooks / automation
     webhook_rate_limit_max: int = 60
