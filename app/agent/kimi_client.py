@@ -35,6 +35,23 @@ class DiagnosisValidationError(Exception):
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
+def _is_recoverable_model_error(error: Exception) -> bool:
+    err_str = str(error).lower()
+    return any(
+        marker in err_str
+        for marker in (
+            "402",
+            "429",
+            "503",
+            "insufficient",
+            "rate limit",
+            "timeout",
+            "timed out",
+            "temporarily unavailable",
+            "connection",
+        )
+    )
+
 def _extract_json_from_prose(text: str) -> dict | None:
     """
     Last-resort: if the model returned prose instead of a tool call,
@@ -113,8 +130,8 @@ async def _call_kimi_reasoning(messages: list):
             extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
         )
     except Exception as e:
-        err_str = str(e)
-        if any(code in err_str for code in ["402", "429", "503", "insufficient"]):
+        if _is_recoverable_model_error(e):
+            err_str = str(e)
             logger.warning(
                 f"Kimi reasoning call recoverable error ({e.__class__.__name__}): "
                 f"{err_str[:200]} — will try fallback"
@@ -153,8 +170,8 @@ async def _call_kimi_structured(messages: list, tool_schema: dict):
         )
     except Exception as e:
         # 402 insufficient credits, 429 rate limit, 503 provider down — all recoverable
-        err_str = str(e)
-        if any(code in err_str for code in ["402", "429", "503", "insufficient"]):
+        if _is_recoverable_model_error(e):
+            err_str = str(e)
             logger.warning(f"Kimi API recoverable error ({e.__class__.__name__}): {err_str[:200]} — will try fallback")
             return None, "", {"latency_ms": int((time.time() - start) * 1000)}
         raise
@@ -286,8 +303,8 @@ async def _call_kimi_with_tools(messages: list, tools: list[dict]):
             extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
         )
     except Exception as e:
-        err_str = str(e)
-        if any(code in err_str for code in ["402", "429", "503", "insufficient"]):
+        if _is_recoverable_model_error(e):
+            err_str = str(e)
             logger.warning(f"Kimi investigation call recoverable error: {err_str[:200]}")
             return None, "", {"latency_ms": int((time.time() - start) * 1000)}
         raise
@@ -476,10 +493,6 @@ async def call_with_tool(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Treat all models as "kimi" — DeepSeek fallback is disabled
-    if model == "deepseek":
-        logger.warning(f"DeepSeek requested for run {run_id} but fallback is disabled — using Kimi")
-
     # Attempt 1: Kimi K2.6
     args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
@@ -495,7 +508,30 @@ async def call_with_tool(
     if args is not None:
         return args
 
+    if deepseek:
+        logger.warning("Kimi returned no valid tool call after retry — trying DeepSeek fallback")
+        args, raw, usage = await _call_openai_compatible_fallback(
+            deepseek,
+            settings.deepseek_model,
+            messages,
+            tool_schema,
+            "DeepSeek",
+        )
+        _log_agent_call(
+            run_id,
+            f"{call_type}_fallback",
+            settings.deepseek_model,
+            messages,
+            raw,
+            args,
+            usage,
+            valid=(args is not None),
+            error="No tool call from fallback" if args is None else None,
+        )
+        if args is not None:
+            return args
+
     raise DiagnosisValidationError(
         "Kimi returned no valid tool call after 2 attempts. "
-        "Check agent_calls table for raw responses."
+        "Fallback was unavailable or also failed. Check agent_calls table for raw responses."
     )

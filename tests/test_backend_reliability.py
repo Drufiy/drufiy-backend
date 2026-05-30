@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+
 import pytest
 
 from app.agent.pr_creator import (
@@ -9,7 +12,8 @@ from app.agent.pr_creator import (
     apply_unified_patch,
 )
 from app.agent.processor import _is_fix_branch_for_run
-from app.webhook import _is_fix_branch, _strip_fix_branch_prefix
+from app.config import settings
+from app.webhook import _is_fix_branch, _strip_fix_branch_prefix, verify_signature
 
 
 class _Resp:
@@ -36,6 +40,19 @@ def test_fix_branch_prefixes_are_backward_compatible():
     assert _is_fix_branch("drufiy/fix-run-12345678")
     assert _strip_fix_branch_prefix("prash/fix-run-12345678-999") == "12345678-999"
     assert _strip_fix_branch_prefix("drufiy/fix-run-12345678") == "12345678"
+
+
+def test_webhook_signature_validation_is_strict():
+    body = b'{"action":"completed"}'
+    valid = "sha256=" + hmac.new(
+        settings.github_webhook_secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+
+    assert verify_signature(body, valid)
+    assert not verify_signature(body, None)
+    assert not verify_signature(body, "sha256=bad")
 
 
 def test_dedupe_only_matches_same_run_prefix():
