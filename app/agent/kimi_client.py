@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 kimi = AsyncOpenAI(
     api_key=settings.kimi_api_key,
     base_url=settings.kimi_base_url,
-    timeout=120.0,
+    timeout=240.0,
 )
 
 deepseek = (
@@ -115,66 +116,101 @@ def _merge_usage(*usages: dict) -> dict:
     }
 
 
+def _is_transient_error(e: Exception) -> bool:
+    """Check if an error is transient and worth retrying (timeouts, disconnections, etc.)."""
+    err_str = str(e)
+    transient_signals = [
+        "timed out", "timeout", "TimeoutError",
+        "disconnected", "connection", "ConnectionError",
+        "RemoteProtocolError", "Server disconnected",
+        "502", "503", "504", "529",
+    ]
+    return any(signal.lower() in err_str.lower() for signal in transient_signals)
+
+
 async def _call_kimi_reasoning(messages: list):
     """
     First Kimi call: allow thinking and free-form analysis before forcing a tool call.
     Returns (reasoning_text_or_none, raw_content, usage_info).
+    Retries once on transient errors (timeouts, disconnections).
     """
-    start = time.time()
-    try:
-        response = await kimi.chat.completions.create(
-            model=settings.kimi_model,
-            messages=messages,
-            max_tokens=4000,
-            temperature=1,  # kimi-k2.6 with thinking enabled requires temperature=1
-            extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
-        )
-    except Exception as e:
-        if _is_recoverable_model_error(e):
-            err_str = str(e)
-            logger.warning(
-                f"Kimi reasoning call recoverable error ({e.__class__.__name__}): "
-                f"{err_str[:200]} — will try fallback"
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        start = time.time()
+        try:
+            response = await kimi.chat.completions.create(
+                model=settings.kimi_model,
+                messages=messages,
+                max_tokens=4000,
+                temperature=1,
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": 1500}},
             )
-            return None, "", {"latency_ms": int((time.time() - start) * 1000)}
-        raise
+        except Exception as e:
+            if _is_recoverable_model_error(e) and not _is_transient_error(e):
+                err_str = str(e)
+                logger.warning(
+                    f"Kimi reasoning call recoverable error ({e.__class__.__name__}): "
+                    f"{err_str[:200]} — will try fallback"
+                )
+                return None, "", {"latency_ms": int((time.time() - start) * 1000)}
+            if _is_transient_error(e) and attempt < max_attempts - 1:
+                logger.warning(
+                    f"Kimi reasoning transient error (attempt {attempt + 1}/{max_attempts}): "
+                    f"{str(e)[:200]} — retrying after 5s"
+                )
+                await asyncio.sleep(5)
+                continue
+            raise
 
-    latency_ms = int((time.time() - start) * 1000)
-    msg = response.choices[0].message
-    # Kimi thinking responses put the analysis in reasoning_content, content may be empty
-    reasoning_content = getattr(msg, "reasoning_content", None) or ""
-    content = msg.content or ""
-    reasoning = reasoning_content or content  # prefer reasoning_content (the actual thinking)
-    logger.info(f"Kimi reasoning: content={len(content)} chars, reasoning_content={len(reasoning_content)} chars")
-    return reasoning, reasoning, _usage_from_response(response, latency_ms)
+        latency_ms = int((time.time() - start) * 1000)
+        msg = response.choices[0].message
+        # Kimi thinking responses put the analysis in reasoning_content, content may be empty
+        reasoning_content = getattr(msg, "reasoning_content", None) or ""
+        content = msg.content or ""
+        reasoning = reasoning_content or content  # prefer reasoning_content (the actual thinking)
+        logger.info(f"Kimi reasoning: content={len(content)} chars, reasoning_content={len(reasoning_content)} chars")
+        return reasoning, reasoning, _usage_from_response(response, latency_ms)
+
+    # Should not reach here, but just in case
+    return None, "", {"latency_ms": 0}
 
 
 async def _call_kimi_structured(messages: list, tool_schema: dict):
     """
     Returns (parsed_args_or_none, raw_content, usage_info).
-    Handles 402 (credit exhausted) gracefully — returns None so DeepSeek fallback fires.
+    Handles 402 (credit exhausted) gracefully — returns None so fallback fires.
+    Retries once on transient errors (timeouts, disconnections).
 
     Note: kimi-k2.6 with thinking disabled requires exactly temperature=0.6.
     Extended thinking is disabled because it is incompatible with forced tool_choice.
     """
-    start = time.time()
-    try:
-        response = await kimi.chat.completions.create(
-            model=settings.kimi_model,
-            messages=messages,
-            tools=[{"type": "function", "function": tool_schema}],
-            tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
-            temperature=0.6,   # required when thinking is disabled on kimi-k2.6
-            max_tokens=8000,
-            extra_body={"thinking": {"type": "disabled"}},  # disable CoT thinking — incompatible with forced tool_choice
-        )
-    except Exception as e:
-        # 402 insufficient credits, 429 rate limit, 503 provider down — all recoverable
-        if _is_recoverable_model_error(e):
-            err_str = str(e)
-            logger.warning(f"Kimi API recoverable error ({e.__class__.__name__}): {err_str[:200]} — will try fallback")
-            return None, "", {"latency_ms": int((time.time() - start) * 1000)}
-        raise
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        start = time.time()
+        try:
+            response = await kimi.chat.completions.create(
+                model=settings.kimi_model,
+                messages=messages,
+                tools=[{"type": "function", "function": tool_schema}],
+                tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
+                temperature=0.6,
+                max_tokens=4000,
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            break
+        except Exception as e:
+            if _is_recoverable_model_error(e) and not _is_transient_error(e):
+                err_str = str(e)
+                logger.warning(f"Kimi API recoverable error ({e.__class__.__name__}): {err_str[:200]} — will try fallback")
+                return None, "", {"latency_ms": int((time.time() - start) * 1000)}
+            if _is_transient_error(e) and attempt < max_attempts - 1:
+                logger.warning(
+                    f"Kimi structured transient error (attempt {attempt + 1}/{max_attempts}): "
+                    f"{str(e)[:200]} — retrying after 5s"
+                )
+                await asyncio.sleep(5)
+                continue
+            raise
 
     latency_ms = int((time.time() - start) * 1000)
     usage = _usage_from_response(response, latency_ms)
@@ -255,7 +291,7 @@ async def _call_openai_compatible_fallback(
             messages=messages,
             tools=[{"type": "function", "function": tool_schema}],
             tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
-            max_tokens=8000,
+            max_tokens=4000,
             temperature=1,  # DeepSeek V4 Pro only accepts temperature=1
         )
     except Exception as e:
@@ -291,27 +327,38 @@ async def _call_openai_compatible_fallback(
 
 
 async def _call_kimi_with_tools(messages: list, tools: list[dict]):
-    """Single Kimi call with multiple investigation tools enabled."""
-    start = time.time()
-    try:
-        response = await kimi.chat.completions.create(
-            model=settings.kimi_model,
-            messages=messages,
-            tools=[{"type": "function", "function": tool} for tool in tools],
-            max_tokens=4000,
-            temperature=1,  # kimi-k2.6 with thinking enabled requires temperature=1
-            extra_body={"thinking": {"type": "enabled", "budget_tokens": 2000}},
-        )
-    except Exception as e:
-        if _is_recoverable_model_error(e):
-            err_str = str(e)
-            logger.warning(f"Kimi investigation call recoverable error: {err_str[:200]}")
-            return None, "", {"latency_ms": int((time.time() - start) * 1000)}
-        raise
+    """Single Kimi call with multiple investigation tools enabled.
+    Retries once on transient errors."""
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        start = time.time()
+        try:
+            response = await kimi.chat.completions.create(
+                model=settings.kimi_model,
+                messages=messages,
+                tools=[{"type": "function", "function": tool} for tool in tools],
+                max_tokens=4000,
+                temperature=1,
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": 1500}},
+            )
+        except Exception as e:
+            if _is_recoverable_model_error(e) and not _is_transient_error(e):
+                logger.warning(f"Kimi investigation call recoverable error: {str(e)[:200]}")
+                return None, "", {"latency_ms": int((time.time() - start) * 1000)}
+            if _is_transient_error(e) and attempt < max_attempts - 1:
+                logger.warning(
+                    f"Kimi investigation transient error (attempt {attempt + 1}/{max_attempts}): "
+                    f"{str(e)[:200]} — retrying after 5s"
+                )
+                await asyncio.sleep(5)
+                continue
+            raise
 
-    latency_ms = int((time.time() - start) * 1000)
-    msg = response.choices[0].message
-    return msg, json.dumps(msg.model_dump(), default=str), _usage_from_response(response, latency_ms)
+        latency_ms = int((time.time() - start) * 1000)
+        msg = response.choices[0].message
+        return msg, json.dumps(msg.model_dump(), default=str), _usage_from_response(response, latency_ms)
+
+    return None, "", {"latency_ms": 0}
 
 
 def _log_agent_call(run_id, call_type, model, messages, raw, parsed, usage, valid, error=None):

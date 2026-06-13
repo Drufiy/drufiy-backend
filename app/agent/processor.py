@@ -977,6 +977,24 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
         "files_changed": [fc.model_dump() for fc in diagnosis.files_changed],
         "required_secrets": diagnosis.required_secrets,
     }
+
+    # Guard: if a diagnosis for this (run_id, iteration) already exists, update instead of insert
+    # to prevent constraint violations from reconciler retries or duplicate webhook events.
+    existing = (
+        supabase.table("diagnoses")
+        .select("id")
+        .eq("run_id", ci_run_id)
+        .eq("iteration", iteration)
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        logger.warning(
+            f"Diagnosis for run {ci_run_id} iteration {iteration} already exists — updating instead of inserting"
+        )
+        result = supabase.table("diagnoses").update(row).eq("id", existing.data[0]["id"]).execute()
+        return result.data[0] if result.data else {**row, "id": existing.data[0]["id"]}
+
     result = supabase.table("diagnoses").insert(row).execute()
     return result.data[0] if result.data else row
 

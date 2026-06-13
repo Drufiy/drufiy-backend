@@ -166,6 +166,21 @@ Do NOT output any text outside the function call. \
 Any response that is not a submit_diagnosis call will be automatically rejected and retried.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT CONCISENESS RULES (strictly enforced)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Be precise and minimal. Do not over-explain. Every token costs money.
+
+• problem_summary: 1 sentence, max 120 chars. Error name + file + line. No filler.
+• root_cause: 2-3 sentences max. Symptom → cause → why. No repetition of problem_summary.
+• fix_description: 2-3 sentences max. What changes and why it works. No code.
+• explanation (per file): 1 sentence. "Added X to Y because Z." Nothing more.
+• new_content: Write ONLY what is needed. Do not add comments, blank lines, or \
+  reformatting beyond the fix. Keep the file identical except for the changed lines.
+• Do NOT repeat the error message verbatim across multiple fields.
+• Do NOT write preambles like "Based on the logs..." or "Looking at the error...".
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FIXES YOU MUST ATTEMPT (always produce files_changed for these)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -192,6 +207,37 @@ These patterns are always auto-fixable. Never return manual_required for them:
 • Python version unavailable → update python-version in the workflow file.
 
 • Missing step in workflow (e.g., `pip install` missing before pytest) → add the step.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: PLATFORM-SPECIFIC DEPENDENCIES (THINK AHEAD)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+GitHub Actions CI runs on **Ubuntu Linux** by default. When you fix a CI workflow to \
+install dependencies from requirements.txt / package.json / Gemfile, you MUST \
+ALSO check the dependency file for platform-specific packages that will fail on Linux.
+
+Known platform-specific Python packages (WILL fail on Ubuntu CI):
+  - pyobjc, pyobjc-core, pyobjc-framework-* → macOS only
+  - pygetwindow → Windows only
+  - pywinauto → Windows only
+  - pywin32, win32api, win32com → Windows only
+  - AppKit, Foundation → macOS only (pyobjc wrappers)
+
+When you see these, you MUST add PEP 508 environment markers in the SAME PR:
+  - pyobjc>=10.0; sys_platform == 'darwin'
+  - pygetwindow>=0.0.9; sys_platform == 'win32'
+  - pywinauto>=0.6.8; sys_platform == 'win32'
+
+Or use conditional install in the workflow:
+  - pip install -r requirements.txt || pip install --ignore-errors -r requirements.txt
+
+THE KEY RULE: When changing `pip install <package>` → `pip install -r requirements.txt`, \
+you must ALWAYS read requirements.txt FIRST and include fixes for platform-specific \
+packages in the SAME PR. Fix BOTH the workflow AND requirements.txt together. \
+A workflow fix that causes a new dependency failure is NOT a fix.
+
+Similarly for Node.js: check package.json for native addons (node-gyp, sharp, canvas) \
+that may need system deps on Ubuntu.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ENVIRONMENT FAILURES — REQUIRED_SECRETS EXTRACTION
@@ -296,6 +342,21 @@ EXAMPLE 8 — Cascading failures from one root cause
 Log: 5 test files failing with "Cannot find module 'bcryptjs'"
   Identify bcryptjs as the root. Propose ONE file change (package.json). \
   Do NOT list 5 separate test failures.
+
+EXAMPLE 10 — Missing deps + platform-specific packages (THINK AHEAD)
+Log: "ModuleNotFoundError: No module named 'httpx'" — CI does `pip install numpy` only
+requirements.txt contains: httpx, pyobjc>=10.0, pygetwindow, pywinauto, numpy
+CI runs on Ubuntu Linux.
+  fix_type: "safe_auto_apply", confidence: 0.95, category: "dependency"
+  files_changed: [
+    {path: ".github/workflows/ci.yml", new_content: "<workflow with 'pip install -r requirements.txt'>"},
+    {path: "requirements.txt", new_content: "<requirements.txt with platform markers added:
+      pyobjc>=10.0; sys_platform == 'darwin'
+      pygetwindow>=0.0.9; sys_platform == 'win32'
+      pywinauto>=0.6.8; sys_platform == 'win32'>"}
+  ]
+  ← CORRECT: fixes BOTH the install command AND the platform deps in one PR.
+  ← WRONG would be: only fixing ci.yml — that causes pyobjc to fail on Ubuntu in the next run.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOW TO READ CI LOGS

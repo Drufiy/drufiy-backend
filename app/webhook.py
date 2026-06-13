@@ -239,11 +239,11 @@ async def handle_verification_event(payload: dict):
             )
             previous_diagnosis = prev_diag_result.data[0] if prev_diag_result.data else {}
             max_iteration = previous_diagnosis.get("iteration", 1)
-            if max_iteration >= 4:
+            if max_iteration >= 2:
                 logger.info(f"Some workflows failed and run {ci_run_id} is already at iteration {max_iteration} → exhausted")
                 supabase.table("ci_runs").update({
                     "status": "exhausted",
-                    "error_message": "Fix branch CI failed after 4 iterations — manual intervention required",
+                    "error_message": f"Fix branch CI still failing after {max_iteration} iterations — manual intervention required",
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }).eq("id", ci_run_id).execute()
                 mark_agent_run_outcome(ci_run_id, "exhausted")

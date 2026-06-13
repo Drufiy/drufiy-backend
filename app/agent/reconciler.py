@@ -143,11 +143,11 @@ async def _reconcile_one(ci_run: dict) -> int:
         previous_diagnosis = diag_result.data[0] if diag_result.data else {}
         max_iteration = previous_diagnosis.get("iteration", 1)
 
-        if max_iteration >= 4:
+        if max_iteration >= 2:
             logger.info(f"Reconciler: run {ci_run_id[:8]} fix branch failed on iter {max_iteration} → exhausted")
             supabase.table("ci_runs").update({
                 "status": "exhausted",
-                "error_message": "Fix branch CI failed after 4 iterations — manual intervention required",
+                "error_message": f"Fix branch CI still failing after {max_iteration} iterations — manual intervention required",
                 "updated_at": now,
             }).eq("id", ci_run_id).execute()
             mark_agent_run_outcome(ci_run_id, "exhausted")
@@ -196,9 +196,31 @@ async def _recover_stuck_diagnosing(cutoff: str) -> int:
     for run in stuck_runs:
         ci_run_id = run["id"]
         try:
+            # Check if a diagnosis already exists — if so, don't re-run process_failure
+            # (that would create a duplicate iteration=1 and violate the DB constraint)
+            existing_diag = (
+                supabase.table("diagnoses")
+                .select("id, iteration")
+                .eq("run_id", ci_run_id)
+                .limit(1)
+                .execute()
+            )
+            if existing_diag.data:
+                logger.info(
+                    f"Reconciler: run {ci_run_id[:8]} already has a diagnosis "
+                    f"(iteration={existing_diag.data[0]['iteration']}) — marking as diagnosed instead of re-processing"
+                )
+                supabase.table("ci_runs").update({
+                    "status": "diagnosed",
+                    "error_message": "Auto-recovered after server restart (was stuck in diagnosing)",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", ci_run_id).execute()
+                resolved += 1
+                continue
+
             supabase.table("ci_runs").update({
                 "status": "pending",
-                "error_message": None,
+                "error_message": "Auto-recovered after server restart (was stuck in-progress)",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", ci_run_id).execute()
             await process_failure(ci_run_id)
