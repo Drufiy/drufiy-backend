@@ -208,6 +208,30 @@ These patterns are always auto-fixable. Never return manual_required for them:
 
 • Missing step in workflow (e.g., `pip install` missing before pytest) → add the step.
 
+• Workflow runs `npm ci` / `npm install` but there is no package.json in the repo →
+  The workflow is wrong for the project type. Fix the workflow file. Either:
+  (a) Remove the npm steps entirely if the project is a static site (HTML/CSS/JS with no build step), OR
+  (b) Add a minimal package.json + lock file if the project legitimately needs npm.
+  category: workflow_config, fix_type: safe_auto_apply, files_changed MUST include the workflow file.
+  NEVER return manual_required for this — you know exactly what to change.
+
+• Workflow runs `pip install` / `pytest` but there is no requirements.txt / setup.py →
+  Same pattern. Fix the workflow to match the actual project structure.
+  category: workflow_config, fix_type: safe_auto_apply, files_changed MUST include the workflow file.
+
+• Workflow uses `cache: npm` / `cache: pip` but the lock file (package-lock.json, poetry.lock, etc.)
+  doesn't exist → remove the cache option from the workflow step. One-line fix.
+  category: workflow_config, fix_type: safe_auto_apply.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL: workflow_config FIXES ALWAYS PRODUCE FILES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If category=workflow_config, you MUST include the fixed workflow file in files_changed.
+A workflow_config diagnosis with no files_changed is ALWAYS wrong — the workflow file \
+is a text file you can edit directly. Never say "manual action required" for a workflow \
+file change you know how to make. Write the corrected workflow YAML and ship it.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL: PLATFORM-SPECIFIC DEPENDENCIES (THINK AHEAD)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -357,6 +381,27 @@ CI runs on Ubuntu Linux.
   ]
   ← CORRECT: fixes BOTH the install command AND the platform deps in one PR.
   ← WRONG would be: only fixing ci.yml — that causes pyobjc to fail on Ubuntu in the next run.
+
+EXAMPLE 11 — Workflow wrong for project type (MOST IMPORTANT PATTERN)
+Log: "npm warn logfile could not be created" + "npm error Could not read package.json"
+The repo is a vanilla HTML/CSS/JS static site. No package.json, no package-lock.json.
+Workflow runs: setup-node with cache: npm, then npm ci, then npx tsc --noEmit.
+  fix_type: "safe_auto_apply", confidence: 0.95, category: "workflow_config"
+  files_changed: [
+    {path: ".github/workflows/ci.yml", new_content: "name: ci\non: [push, pull_request]\njobs:\n  lint:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Check HTML\n        run: echo 'Static site — no build step required'"}
+  ]
+  ← CORRECT: edits the workflow to remove the npm steps entirely. Ships a PR.
+  ← WRONG: returning manual_required with no files. You know the fix — write it.
+  ← WRONG: saying "add a package.json" when the project doesn't use npm at all.
+
+EXAMPLE 12 — Workflow caches lock file that doesn't exist
+Log: "Error: Dependencies lock file is not found in /home/runner/work/..."
+Workflow uses setup-node with cache: npm but there is no package-lock.json.
+  fix_type: "safe_auto_apply", confidence: 0.97, category: "workflow_config"
+  files_changed: [
+    {path: ".github/workflows/ci.yml", new_content: "<same workflow but with 'cache: npm' line removed>"}
+  ]
+  ← One-line fix. Never escalate this to manual_required.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOW TO READ CI LOGS
@@ -657,11 +702,21 @@ def _apply_deterministic_guardrails(
     if secrets:
         merged = sorted(set([*diagnosis.required_secrets, *secrets]))
         updates["required_secrets"] = merged
-        # Only override category/files if the model didn't already identify a fixable problem.
-        # Prevents "all" or similar false positives from nuking a good workflow_config diagnosis.
+        # Only override category/files when there's no better diagnosis.
+        # Never let secret extraction nuke a workflow_config/code/dependency fix.
         if not diagnosis.files_changed and diagnosis.category not in ("workflow_config", "code", "dependency"):
             updates["category"] = "environment"
             updates["fix_type"] = "manual_required"
+
+    # If the model diagnosed workflow_config but produced no files, the prompt didn't
+    # drive it hard enough. Keep the category and degrade to review_recommended so the
+    # dashboard at least shows what needs to be changed, rather than manual_required.
+    if (diagnosis.category == "workflow_config"
+            and not diagnosis.files_changed
+            and diagnosis.fix_type == "manual_required"
+            and "fix_type" not in updates):
+        updates["fix_type"] = "review_recommended"
+        updates["speculative"] = True
 
     missing_copy_path = _extract_missing_docker_copy_path(logs)
     if missing_copy_path and diagnosis.fix_type == "safe_auto_apply":
