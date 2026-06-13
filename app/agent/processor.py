@@ -1056,8 +1056,14 @@ async def _apply_fix(
             base_sha=base_sha,
         )
     except PRCreationError as e:
-        logger.error(f"PR creation failed for run {ci_run_id}: {e}")
-        await _mark_failed(ci_run_id, "diagnosis_failed", f"PR creation failed: {str(e)[:200]}")
+        error_msg = str(e)
+        logger.error(f"PR creation failed for run {ci_run_id}: {error_msg}")
+        if "WORKFLOW_SCOPE_REQUIRED" in error_msg:
+            await _mark_failed(ci_run_id, "diagnosed",
+                "Workflow file edit requires the 'workflow' GitHub scope. "
+                "User must reconnect their GitHub account to grant it.")
+        else:
+            await _mark_failed(ci_run_id, "diagnosis_failed", f"PR creation failed: {error_msg[:200]}")
         return
 
     supabase.table("ci_runs").update({

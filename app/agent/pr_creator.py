@@ -143,6 +143,11 @@ async def _put_file(client, repo_full_name, branch, file_change):
         body["sha"] = existing_sha
 
     resp = await client.put(f"{GITHUB_API}/repos/{repo_full_name}/contents/{path}", json=body)
+    if resp.status_code == 403 and path.startswith(".github/workflows/"):
+        raise PRCreationError(
+            "WORKFLOW_SCOPE_REQUIRED: editing workflow files needs the GitHub 'workflow' "
+            "scope. The user must reconnect and grant it, or use the GitHub App integration."
+        )
     if resp.status_code not in (200, 201):
         _raise_github_error(resp, f"Failed to commit {path}")
 
