@@ -440,6 +440,7 @@ async def call_with_investigation(
     execute_tool,
     run_id: str | None = None,
     call_type: str = "diagnosis",
+    max_steps: int = 4,
 ) -> dict:
     messages = [
         {"role": "system", "content": system_prompt},
@@ -447,95 +448,73 @@ async def call_with_investigation(
     ]
     all_tools = investigation_tools + [diagnosis_tool_schema]
 
-    for step in range(3):
+    for step in range(max_steps):
         message, raw, usage = await _call_kimi_with_tools(messages, all_tools)
-        parsed = None
-        valid = False
-        error = None
 
         if not message or not message.tool_calls:
-            error = "Kimi investigation step returned no tool call"
-        else:
-            tool_call = message.tool_calls[0]
-            tool_name = tool_call.function.name
-            try:
-                tool_args = json.loads(tool_call.function.arguments or "{}")
-            except json.JSONDecodeError:
-                tool_args = {}
-                error = "Kimi investigation step returned invalid tool arguments"
+            _log_agent_call(
+                run_id, f"{call_type}_step_{step + 1}", settings.kimi_model,
+                messages, raw, None, usage, valid=False,
+                error="no tool call — nudging",
+            )
+            messages.append({"role": "assistant", "content": (message.content if message else "") or ""})
+            messages.append({"role": "user", "content":
+                "You did not call a tool. Either call an investigation tool to gather "
+                "what you still need, or call submit_diagnosis now with your best fix."})
+            continue
 
-            if tool_name == diagnosis_tool_schema["name"] and error is None:
-                parsed = tool_args
-                valid = True
-                _log_agent_call(
-                    run_id,
-                    f"{call_type}_investigation_step_{step + 1}",
-                    settings.kimi_model,
-                    messages,
-                    raw,
-                    parsed,
-                    usage,
-                    valid=True,
-                )
-                return parsed
+        tool_call = message.tool_calls[0]
+        tool_name = tool_call.function.name
+        try:
+            tool_args = json.loads(tool_call.function.arguments or "{}")
+        except json.JSONDecodeError:
+            tool_args = {}
 
-            if error is None:
-                tool_result = await execute_tool(tool_name, tool_args)
-                # Kimi requires reasoning_content in assistant messages when thinking
-                # is enabled. Without it: "thinking is enabled but reasoning_content
-                # is missing in assistant tool call message at index N"
-                assistant_msg = {
-                    "role": "assistant",
-                    "content": message.content or "",
-                    "tool_calls": [{
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }],
-                }
-                reasoning = getattr(message, "reasoning_content", None)
-                if reasoning:
-                    assistant_msg["reasoning_content"] = reasoning
-                messages.append(assistant_msg)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": tool_result,
-                })
-                parsed = {"tool_name": tool_name, "tool_args": tool_args}
-                valid = True
+        if tool_name == diagnosis_tool_schema["name"]:
+            _log_agent_call(
+                run_id, f"{call_type}_step_{step + 1}", settings.kimi_model,
+                messages, raw, tool_args, usage, valid=True,
+            )
+            return tool_args
 
+        tool_result = await execute_tool(tool_name, tool_args)
+        assistant_msg = {
+            "role": "assistant",
+            "content": message.content or "",
+            "tool_calls": [{
+                "id": tool_call.id,
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "arguments": tool_call.function.arguments,
+                },
+            }],
+        }
+        reasoning = getattr(message, "reasoning_content", None)
+        if reasoning:
+            assistant_msg["reasoning_content"] = reasoning
+        messages.append(assistant_msg)
+        messages.append({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": tool_result,
+        })
         _log_agent_call(
-            run_id,
-            f"{call_type}_investigation_step_{step + 1}",
-            settings.kimi_model,
-            messages,
-            raw,
-            parsed,
-            usage,
-            valid=valid,
-            error=error,
+            run_id, f"{call_type}_step_{step + 1}", settings.kimi_model,
+            messages, raw, {"tool": tool_name}, usage, valid=True,
         )
 
-    final_prompt = "You have completed your investigation steps. Now submit your structured diagnosis using the tool."
-    final_messages = messages + [{"role": "user", "content": final_prompt}]
+    final_messages = messages + [{"role": "user", "content":
+        "Investigation complete. Submit your structured diagnosis now using submit_diagnosis."}]
     args, raw, usage = await _call_kimi_structured(final_messages, diagnosis_tool_schema)
     _log_agent_call(
-        run_id,
-        f"{call_type}_investigation_final",
-        settings.kimi_model,
-        final_messages,
-        raw,
-        args,
-        usage,
+        run_id, f"{call_type}_final", settings.kimi_model,
+        final_messages, raw, args, usage,
         valid=(args is not None),
-        error="No tool call in forced final diagnosis" if args is None else None,
+        error=None if args else "forced final produced no tool call",
     )
     if args is None:
-        raise DiagnosisValidationError("Kimi investigation loop did not yield a final diagnosis.")
+        raise DiagnosisValidationError("Investigation loop did not yield a final diagnosis.")
     return args
 
 
