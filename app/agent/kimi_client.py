@@ -259,10 +259,10 @@ async def _call_kimi(messages: list, tool_schema: dict):
     """
     reasoning, reasoning_raw, reasoning_usage = await _call_kimi_reasoning(messages)
     if not reasoning:
-        return None, reasoning_raw, reasoning_usage
+        logger.info("Empty reasoning — falling through to direct structured call")
+        args, structured_raw, structured_usage = await _call_kimi_structured(messages, tool_schema)
+        return args, structured_raw, _merge_usage(reasoning_usage, structured_usage)
 
-    # Append reasoning as a user-side context note rather than a fake assistant message.
-    # Kimi rejects synthetic assistant messages when thinking was enabled in a prior turn.
     structured_messages = [
         *messages,
         {
