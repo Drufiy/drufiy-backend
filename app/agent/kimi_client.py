@@ -394,6 +394,9 @@ def _estimate_cost_usd(model: str, usage: dict) -> float | None:
     elif model == settings.deepseek_model:
         input_rate = settings.deepseek_input_price_per_1m_tokens
         output_rate = settings.deepseek_output_price_per_1m_tokens
+    elif settings.fallback_model and model == settings.fallback_model:
+        input_rate = settings.fallback_input_price_per_1m_tokens
+        output_rate = settings.fallback_output_price_per_1m_tokens
     else:
         return None
 

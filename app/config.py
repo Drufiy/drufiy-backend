@@ -15,10 +15,18 @@ class Settings(BaseSettings):
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-coder"
-    kimi_input_price_per_1m_tokens: float | None = None
-    kimi_output_price_per_1m_tokens: float | None = None
+    kimi_input_price_per_1m_tokens: float | None = 0.60
+    kimi_output_price_per_1m_tokens: float | None = 2.50
     deepseek_input_price_per_1m_tokens: float | None = None
     deepseek_output_price_per_1m_tokens: float | None = None
+
+    # Generic fallback model (OpenAI-compatible — provider-agnostic)
+    fallback_enabled: bool = False
+    fallback_api_key: str | None = None
+    fallback_base_url: str | None = None
+    fallback_model: str | None = None
+    fallback_input_price_per_1m_tokens: float | None = None
+    fallback_output_price_per_1m_tokens: float | None = None
 
     # GitHub
     github_client_id: str
@@ -58,7 +66,7 @@ class Settings(BaseSettings):
     # Environment
     env: str = "development"
 
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
 
 settings = Settings()
