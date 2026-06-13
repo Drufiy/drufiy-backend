@@ -53,6 +53,9 @@ async def reconcile_stuck_verifications() -> int:
         applying_cutoff = (now - timedelta(minutes=3)).isoformat()
         fixed_cutoff = (now - timedelta(minutes=3)).isoformat()
 
+        pending_cutoff = (now - timedelta(minutes=10)).isoformat()
+
+        resolved += await _recover_stuck_pending(pending_cutoff)
         resolved += await _recover_stuck_diagnosing(diagnosing_cutoff)
         resolved += await _recover_stuck_applying(applying_cutoff)
         resolved += await _recover_stuck_fixed(fixed_cutoff)
@@ -175,6 +178,32 @@ async def _reconcile_one(ci_run: dict) -> int:
         from app.agent.processor import process_iteration_2
         await process_iteration_2(ci_run_id, new_logs, previous_diagnosis)
         return 1
+
+
+async def _recover_stuck_pending(cutoff: str) -> int:
+    """Re-queue runs stuck in 'pending' — the background task likely died before starting."""
+    stuck_result = (
+        supabase.table("ci_runs")
+        .select("id")
+        .eq("status", "pending")
+        .lt("created_at", cutoff)
+        .execute()
+    )
+    stuck_runs = stuck_result.data or []
+    if not stuck_runs:
+        return 0
+
+    logger.info(f"Reconciler: found {len(stuck_runs)} run(s) stuck in 'pending'")
+    from app.agent.processor import process_failure
+
+    resolved = 0
+    for run in stuck_runs:
+        try:
+            await process_failure(run["id"])
+            resolved += 1
+        except Exception as e:
+            logger.warning(f"Reconciler: failed to requeue pending {run['id'][:8]}: {e}")
+    return resolved
 
 
 async def _recover_stuck_diagnosing(cutoff: str) -> int:

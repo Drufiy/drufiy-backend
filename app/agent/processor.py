@@ -865,34 +865,36 @@ async def _materialize_patch_file_changes(diagnosis, repo_full_name: str, access
 
 def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:
     """
-    Return the most recent verified fixes for this repo as RAG context.
-    Best-effort — returns [] on any error.
+    Return recent verified fixes as RAG context.
+    Prefers same-repo fixes, falls back to cross-repo matches.
     """
     try:
-        # Step 1: collect all ci_run IDs for this repo
+        pool_resp = (
+            supabase.table("diagnoses")
+            .select("problem_summary, root_cause, fix_description, category, confidence, files_changed, run_id")
+            .eq("verification_status", "verified")
+            .neq("fix_type", "manual_required")
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        pool = pool_resp.data or []
+        if not pool:
+            return []
+
         runs_resp = (
             supabase.table("ci_runs")
             .select("id")
             .eq("repo_id", repo_id)
             .execute()
         )
-        run_ids = [r["id"] for r in (runs_resp.data or [])]
-        if not run_ids:
-            return []
+        repo_run_ids = {r["id"] for r in (runs_resp.data or [])}
 
-        # Step 2: most recent verified diagnoses that produced a file fix
-        diag_resp = (
-            supabase.table("diagnoses")
-            .select("problem_summary, root_cause, fix_description, category, confidence, files_changed")
-            .in_("run_id", run_ids)
-            .eq("verification_status", "verified")
-            .neq("fix_type", "manual_required")
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        fixes = diag_resp.data or []
-        logger.info(f"RAG: fetched {len(fixes)} verified fixes for repo_id={repo_id}")
+        same_repo = [d for d in pool if d.get("run_id") in repo_run_ids]
+        fixes = (same_repo or pool)[:limit]
+        for f in fixes:
+            f.pop("run_id", None)
+        logger.info(f"RAG: fetched {len(fixes)} fixes (same_repo={len(same_repo)}) for repo_id={repo_id}")
         return fixes
     except Exception as e:
         logger.warning(f"RAG fetch failed for repo_id={repo_id}: {e}")
