@@ -473,7 +473,9 @@ def _preprocess_logs(raw: str) -> str:
         filtered = _filter_section_lines(body)
         result_parts.append(f"{header}\n{filtered}")
 
-    return "\n\n".join(result_parts)
+    last_body = splits[-1] if splits else raw
+    tail = "\n".join(last_body.splitlines()[-40:])
+    return "\n\n".join(result_parts) + "\n\n=== RAW TAIL (last 40 lines) ===\n" + tail
 
 
 def _filter_section_lines(section: str) -> str:
