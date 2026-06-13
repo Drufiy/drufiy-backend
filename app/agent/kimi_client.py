@@ -128,6 +128,18 @@ def _is_transient_error(e: Exception) -> bool:
     return any(signal.lower() in err_str.lower() for signal in transient_signals)
 
 
+async def _create_chat(client, **kwargs):
+    """Create a completion, recovering from per-model temperature rules."""
+    try:
+        return await client.chat.completions.create(**kwargs)
+    except Exception as e:
+        if "temperature" in str(e).lower() and kwargs.get("temperature") != 1:
+            logger.warning("Model rejected temperature=%s — retrying at 1", kwargs.get("temperature"))
+            kwargs["temperature"] = 1
+            return await client.chat.completions.create(**kwargs)
+        raise
+
+
 async def _call_kimi_reasoning(messages: list):
     """
     First Kimi call: allow thinking and free-form analysis before forcing a tool call.
@@ -138,7 +150,7 @@ async def _call_kimi_reasoning(messages: list):
     for attempt in range(max_attempts):
         start = time.time()
         try:
-            response = await kimi.chat.completions.create(
+            response = await _create_chat(kimi,
                 model=settings.kimi_model,
                 messages=messages,
                 max_tokens=4000,
@@ -188,7 +200,7 @@ async def _call_kimi_structured(messages: list, tool_schema: dict):
     for attempt in range(max_attempts):
         start = time.time()
         try:
-            response = await kimi.chat.completions.create(
+            response = await _create_chat(kimi,
                 model=settings.kimi_model,
                 messages=messages,
                 tools=[{"type": "function", "function": tool_schema}],
@@ -286,13 +298,13 @@ async def _call_openai_compatible_fallback(
         return None, "", {}
     start = time.time()
     try:
-        response = await client.chat.completions.create(
+        response = await _create_chat(client,
             model=model,
             messages=messages,
             tools=[{"type": "function", "function": tool_schema}],
             tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
             max_tokens=4000,
-            temperature=1,  # DeepSeek V4 Pro only accepts temperature=1
+            temperature=1,
         )
     except Exception as e:
         logger.error(f"{label} fallback failed: {e}")
@@ -333,7 +345,7 @@ async def _call_kimi_with_tools(messages: list, tools: list[dict]):
     for attempt in range(max_attempts):
         start = time.time()
         try:
-            response = await kimi.chat.completions.create(
+            response = await _create_chat(kimi,
                 model=settings.kimi_model,
                 messages=messages,
                 tools=[{"type": "function", "function": tool} for tool in tools],
