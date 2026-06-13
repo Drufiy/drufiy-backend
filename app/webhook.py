@@ -489,6 +489,10 @@ async def github_webhook(
         )
         return {"status": "recent_fix_sha_ignored"}
 
+    # Tag smoke-test vs real-user traffic
+    _smoke_signals = ("drufiy smoke test", "test ci", "chore: retrigger", "chore: test")
+    source = "smoke_test" if any(s in commit_message.lower() for s in _smoke_signals) else "user"
+
     # Insert ci_run row (commit_sha, commit_message, github_run_id already extracted above)
     try:
         insert = supabase.table("ci_runs").insert({
@@ -502,6 +506,7 @@ async def github_webhook(
             "commit_message": commit_message,
             "status": "pending",
             "logs_url": workflow_run.get("logs_url"),
+            "source": source,
         }).execute()
     except Exception as e:
         logger.warning(f"ci_run insert raced or failed for GitHub run {github_run_id}: {e}")
