@@ -1,6 +1,14 @@
 from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+_CATEGORY_ALIASES = {
+    "env_config": "environment", "env": "environment", "secrets": "environment",
+    "import_error": "dependency", "imports": "dependency", "deps": "dependency",
+    "database_migration": "code", "db_migration": "code",
+    "ci": "workflow_config", "ci_config": "workflow_config", "workflow": "workflow_config",
+    "flaky": "flaky_test", "test": "code",
+}
+
 
 class FileChange(BaseModel):
     path: str = Field(..., description="File path relative to repo root")
@@ -55,6 +63,14 @@ class Diagnosis(BaseModel):
     is_flaky_test: bool = Field(default=False)
     files_changed: list[FileChange] = Field(default_factory=list)
     category: Literal["code", "workflow_config", "dependency", "environment", "flaky_test", "unknown"]
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _normalize_category(cls, v):
+        if isinstance(v, str):
+            v = v.strip().lower()
+            return _CATEGORY_ALIASES.get(v, v)
+        return v
     logs_truncated_warning: bool = Field(default=False)
     speculative: bool = Field(default=False, description="True when confidence is low but a best-guess PR is still created for review")
     required_secrets: list[str] = Field(
