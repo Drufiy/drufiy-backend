@@ -186,22 +186,46 @@ async def process_failure(ci_run_id: str):
             if skipped:
                 return
 
-        # ── 7. Auto-apply if safe ────────────────────────────────────────────
+        # ── 7. Auto-apply or surface next action ──────────────────────────────
+        base_branch_val = ci_run.get("branch") or repo.get("default_branch", "main")
+        base_sha_val = commit_sha or None
+
         if diagnosis.fix_type == "safe_auto_apply" and not diagnosis.is_flaky_test:
-            # Deduplication: skip if there's already an open Drufiy PR for this repo
             if await _has_open_drufiy_pr(repo_full_name, access_token, ci_run_id):
                 logger.info(f"Skipping PR for run {ci_run_id} — existing open Drufiy PR found for {repo_full_name}")
             else:
                 logger.info(f"safe_auto_apply — creating fix PR for run {ci_run_id}")
                 await _apply_fix(
-                    ci_run_id,
-                    repo_full_name,
-                    access_token,
-                    repo["id"],
-                    diagnosis_row,
-                    diagnosis,
-                    base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
-                    base_sha=commit_sha or None,
+                    ci_run_id, repo_full_name, access_token, repo["id"],
+                    diagnosis_row, diagnosis,
+                    base_branch=base_branch_val, base_sha=base_sha_val,
+                )
+        elif diagnosis.category == "environment" and diagnosis.required_secrets:
+            _safe_defaults = {"CI", "NODE_ENV", "PORT", "RAILS_ENV", "HOME", "PATH", "LANG", "TZ"}
+            real_secrets = [s for s in diagnosis.required_secrets if s not in _safe_defaults]
+            if not real_secrets and diagnosis.files_changed:
+                logger.info(f"Environment fix with only safe defaults — auto-applying for run {ci_run_id}")
+                diagnosis_row["fix_type"] = "safe_auto_apply"
+                supabase.table("diagnoses").update({"fix_type": "safe_auto_apply"}).eq("id", diagnosis_row["id"]).execute()
+                await _apply_fix(
+                    ci_run_id, repo_full_name, access_token, repo["id"],
+                    diagnosis_row, diagnosis,
+                    base_branch=base_branch_val, base_sha=base_sha_val,
+                )
+            else:
+                logger.info(f"Environment fix needs real secrets {real_secrets} — marking needs_secret for run {ci_run_id}")
+                supabase.table("ci_runs").update({
+                    "status": "needs_secret",
+                    "error_message": f"Missing secrets: {', '.join(real_secrets)}. Add them in repo Settings → Secrets, then re-run CI.",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", ci_run_id).execute()
+        elif diagnosis.fix_type == "review_recommended" and diagnosis.files_changed:
+            if not await _has_open_drufiy_pr(repo_full_name, access_token, ci_run_id):
+                logger.info(f"review_recommended with files — creating PR for review on run {ci_run_id}")
+                await _apply_fix(
+                    ci_run_id, repo_full_name, access_token, repo["id"],
+                    diagnosis_row, diagnosis,
+                    base_branch=base_branch_val, base_sha=base_sha_val,
                 )
         else:
             logger.info(f"Fix type '{diagnosis.fix_type}' — waiting for user action on run {ci_run_id}")
