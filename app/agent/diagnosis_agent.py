@@ -627,8 +627,9 @@ _BARE_MODULE_RE = re.compile(
     re.IGNORECASE,
 )
 _SECRET_RE = re.compile(
-    r"\b([A-Z][A-Z0-9_]{2,})\b\s+(?:is\s+)?(?:not defined|not set|missing|required)",
-    re.IGNORECASE,
+    r"\b([A-Z][A-Z0-9_]{3,})\b\s+(?:is\s+)?(?:not defined|not set|missing|required)",
+    # NO re.IGNORECASE — must be SCREAMING_SNAKE_CASE to qualify as a secret name.
+    # "all", "npm", "node" etc. must not match.
 )
 _DOCKER_COPY_SOURCE_RE = re.compile(r"\bCOPY\s+(?:--\S+\s+)*(?P<path>\.?/?[\w./-]+)", re.IGNORECASE)
 _DOCKER_STAT_PATH_RE = re.compile(r"\bstat\s+(?P<path>\.?/?[\w./-]+):", re.IGNORECASE)
@@ -654,10 +655,13 @@ def _apply_deterministic_guardrails(
 
     secrets = _extract_required_secrets(logs)
     if secrets:
-        updates["category"] = "environment"
-        updates["fix_type"] = "manual_required"
-        updates["files_changed"] = []
-        updates["required_secrets"] = sorted(set([*diagnosis.required_secrets, *secrets]))
+        merged = sorted(set([*diagnosis.required_secrets, *secrets]))
+        updates["required_secrets"] = merged
+        # Only override category/files if the model didn't already identify a fixable problem.
+        # Prevents "all" or similar false positives from nuking a good workflow_config diagnosis.
+        if not diagnosis.files_changed and diagnosis.category not in ("workflow_config", "code", "dependency"):
+            updates["category"] = "environment"
+            updates["fix_type"] = "manual_required"
 
     missing_copy_path = _extract_missing_docker_copy_path(logs)
     if missing_copy_path and diagnosis.fix_type == "safe_auto_apply":
@@ -705,11 +709,14 @@ def _changes_dependency_or_workflow(diagnosis: Diagnosis) -> bool:
 
 
 def _extract_required_secrets(logs: str) -> list[str]:
-    ignored = {"CI", "NODE_ENV", "PORT", "RAILS_ENV"}
+    # Known safe CI env vars that are never real secrets
+    _SAFE = {"CI", "NODE_ENV", "PORT", "RAILS_ENV", "HOME", "PATH", "LANG", "TZ",
+             "NPM", "NODE", "YARN", "PNPM", "ALL", "ERROR", "WARN", "INFO", "DEBUG"}
     return [
         match.group(1)
         for match in _SECRET_RE.finditer(logs or "")
-        if match.group(1) not in ignored
+        if match.group(1) not in _SAFE
+        and "_" in match.group(1)  # real secrets almost always have underscores
     ]
 
 
