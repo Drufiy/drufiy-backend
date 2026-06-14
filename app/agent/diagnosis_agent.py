@@ -112,7 +112,7 @@ DIAGNOSIS_TOOL = {
                 "description": (
                     "Files to modify. MUST be empty [] if fix_type=manual_required. "
                     "MUST have at least one entry if fix_type=safe_auto_apply or review_recommended. "
-                    "Each entry must include either the COMPLETE new file content or a unified diff patch."
+                    "Each entry MUST include 'new_content' with the COMPLETE file. Do NOT use 'patch'."
                 ),
                 "items": {
                     "type": "object",
@@ -137,8 +137,7 @@ DIAGNOSIS_TOOL = {
                         "patch": {
                             "type": "string",
                             "description": (
-                                "Optional unified diff patch for a surgical edit. "
-                                "Prefer this when current file contents are provided in the prompt."
+                                "DEPRECATED — do NOT use. Always provide new_content instead."
                             ),
                         },
                         "explanation": {
@@ -311,8 +310,8 @@ When writing new_content or patch for a file, you MUST follow these rules withou
    preserve every function/class from the original that isn't broken? If not, add \
    them back.
 
-6. PREFER PATCHES FOR SMALL CHANGES. If the current file contents are visible and you only \
-   need a surgical edit, return a unified diff in patch instead of rewriting the entire file.
+6. ALWAYS USE new_content. Never use the patch field — always provide the complete \
+   file content in new_content. Patches are fragile and break on whitespace differences.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FEW-SHOT EXAMPLES
