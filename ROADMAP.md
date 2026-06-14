@@ -109,29 +109,16 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 
 ## NEXT SESSIONS — PRIORITIZED BUILD LIST
 
-### Session N+1: Self-Verification Loop (THE BIG ONE)
+### ~~Session N+1: Self-Verification Loop~~ — DONE (2026-06-14)
 
-**Why:** This is the single highest-leverage feature. Prash currently creates a PR and walks away. The dashboard says "Waiting for CI on fix branch" but nothing watches it. If CI fails again on the fix, nothing happens. Closing this loop:
-- Converts ~73% first-try accuracy into 85-90%+ effective accuracy
-- Makes Prash *feel* agentic — users watch it struggle and then win
-- Generates outcome data for the learning flywheel
+**Shipped and live-tested.** Prash now retries on the same branch when CI fails on a fix:
+- `push_fix_to_branch()` in `pr_creator.py` — commits to existing branch, posts retry comment on PR
+- `process_iteration_2` pushes to existing branch (not new branch), lowered confidence threshold to 0.6
+- Max iterations raised from 2 → 3
+- Retry prompt forces model to always attempt a fix (no bail-out to `manual_required`)
+- Race condition fixes in webhook status transitions
 
-**What to build:**
-1. After pushing fix branch → actively poll/watch CI on that branch
-2. If CI passes → mark verified (and auto-merge if enabled)
-3. If CI fails → re-diagnose with:
-   - The **new** error logs (from the fix branch)
-   - Memory of what was already tried (previous diagnosis as context)
-   - The diff that was applied (so it doesn't repeat the same fix)
-4. Push a new commit to the same fix branch
-5. Cap at 2-3 retry attempts, then `exhausted`
-
-**Files to touch:**
-- `app/webhook.py` — verification event handler (partially exists)
-- `app/agent/processor.py` — `process_iteration` logic
-- `app/agent/reconciler.py` — sweep fix branches with no CI activity
-
-**Estimated effort:** 1 day
+**Live test result:** Two-layer TypeScript bug (missing `applyTax` + missing `TaxConfig`). Prash fixed utils.ts (iteration 1, CI failed), then auto-retried and created config.ts (iteration 2, CI passed). PR #5 auto-merged with 2 commits. Deployed as `drufiy-backend-00114-pg6`.
 
 ---
 
