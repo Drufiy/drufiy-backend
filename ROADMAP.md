@@ -138,6 +138,18 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 **Verification test (3-layer bug):** Missing `types.ts` + missing `validators.ts` + `calculateDiscount` signature mismatch.
 Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) → validators.ts (iter 2, CI fail) → main.ts (iter 3, CI pass → auto-merged). Zero duplicate PRs.
 
+### Additional Bug Found & Fixed: Reconciler Overwrites Verified Runs (2026-06-14)
+
+**Symptom:** A verified run reverted to "Failed" on the dashboard after a deploy rollout.
+
+**Root cause:** Deploy killed a diagnosis mid-flight. The reconciler found it stuck in `diagnosing`, blindly reset it to `pending`, and re-ran `process_failure`. The new diagnosis attempt failed ("Investigation loop did not yield a final diagnosis"), overwriting the `verified` status.
+
+**Fix:**
+1. Reconciler now checks for existing PRs before re-queuing — if a PR exists, marks the run `verified` instead of resetting to `pending` (`reconciler.py:237`)
+2. Startup recovery no longer blindly resets to `pending` — defers to the async reconciler loop which has the PR check (`main.py:23`)
+
+**Status:** Fixed, deployed as `drufiy-backend-00124-np2`.
+
 ---
 
 ### Session N+2: Outcome Tracking + Data Flywheel Foundation
@@ -243,7 +255,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00120-7dj` (asia-south1)
+**Cloud Run:** `drufiy-backend-00124-np2` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
