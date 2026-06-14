@@ -1,0 +1,25 @@
+{
+  "id": "workflow_config_static_site",
+  "source": "verified",
+  "repo_full_name": "Aradhya648/hypnochic-v2",
+  "workflow_name": "drufiy-ci",
+  "commit_message": "test: trigger ci failure for prash diagnosis",
+  "logs": "=== typecheck/1_Set up job.txt ===\n2026-06-13T20:26:47.5309928Z ##[group]Runner Image\n2026-06-13T20:26:47.5394882Z Image: ubuntu-24.04\n2026-06-13T20:26:47.5466507Z ##[endgroup]\n\n=== typecheck/2_Run actions_checkout@v4.txt ===\n2026-06-13T20:26:47.5552810Z Working directory is '/home/runner/work/hypnochic-v2/hypnochic-v2'\n2026-06-13T20:26:47.5740028Z ##[group]Initializing the repository\n2026-06-13T20:26:47.5747434Z [command]/usr/bin/git init /home/runner/work/hypnochic-v2/hypnochic-v2\n\n=== typecheck/3_Run actions_setup-node@v4.txt ===\n2026-06-13T20:26:48.1234567Z ##[group]Run actions/setup-node@v4\n2026-06-13T20:26:48.2345678Z with:\n2026-06-13T20:26:48.2346000Z   node-version: 20\n2026-06-13T20:26:48.2346200Z   cache: npm\n2026-06-13T20:26:48.3456789Z ##[error]Dependencies lock file is not found in /home/runner/work/hypnochic-v2/hypnochic-v2. Supported file patterns: package-lock.json,npm-shrinkwrap.json,yarn.lock\n2026-06-13T20:26:48.3457000Z ##[error]Process completed with exit code 1.\n\n=== typecheck/system.txt ===\n2026-06-13T20:26:44.1170000Z Job defined at: Aradhya648/hypnochic-v2/.github/workflows/drufiy-ci.yml@refs/heads/main\n2026-06-13T20:26:44.6200000Z Job is about to start running on the hosted runner: GitHub Actions 1000000042",
+  "current_files": {
+    ".github/workflows/drufiy-ci.yml": "name: drufiy-ci\non: [push, pull_request]\njobs:\n  typecheck:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n          cache: npm\n      - name: Install dependencies\n        run: npm ci\n      - name: TypeScript type check\n        run: npx tsc --noEmit --skipLibCheck\n",
+    "index.html": "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"UTF-8\"><title>Hypnochic</title></head>\n<body><h1>Hypnochic</h1></body>\n</html>\n",
+    "css/style.css": "body { margin: 0; font-family: sans-serif; }\n",
+    "js/main.js": "console.log('hypnochic');\n"
+  },
+  "expected": {
+    "category": "workflow_config",
+    "fix_type": "safe_auto_apply",
+    "confidence": 0.9,
+    "files_changed_paths": [
+      ".github/workflows/drufiy-ci.yml"
+    ],
+    "problem_summary": "setup-node fails because lock file missing; repo is static HTML/CSS/JS with no package.json",
+    "verified": true
+  },
+  "notes": "Live prod case — Prash diagnosed workflow_config, created PR, CI passed, user merged. Workflow had npm steps on a pure static HTML site."
+}

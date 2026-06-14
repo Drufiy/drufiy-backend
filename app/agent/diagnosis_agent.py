@@ -572,7 +572,8 @@ async def diagnose_failure(
     investigation_context: dict | None = None,
 ) -> Diagnosis:
     """
-    Run Kimi K2.6 diagnosis on CI logs. Returns a validated Diagnosis object.
+    Run CI log diagnosis via the configured primary model (DeepSeek V4 Pro or Kimi K2.6).
+    Returns a validated Diagnosis object.
     Raises DiagnosisValidationError if the model cannot produce valid structured output.
     """
     # Truncate extremely long logs before preprocessing
@@ -608,7 +609,7 @@ async def diagnose_failure(
     if force_fix:
         call_type = "force_fix_diagnosis"
 
-    if model == "kimi" and investigation_context:
+    if investigation_context:
         raw_args = await call_with_investigation(
             system_prompt=SYSTEM_PROMPT,
             user_prompt=user_prompt,
@@ -617,6 +618,7 @@ async def diagnose_failure(
             execute_tool=lambda name, args: _execute_investigation_tool(name, args, investigation_context),
             run_id=run_id,
             call_type=call_type,
+            model=model,
         )
     else:
         raw_args = await call_with_tool(

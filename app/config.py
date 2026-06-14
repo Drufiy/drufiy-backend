@@ -11,14 +11,17 @@ class Settings(BaseSettings):
     kimi_base_url: str = "https://api.moonshot.ai/v1"
     kimi_model: str = "kimi-k2.6"  # Moonshot's latest model
 
-    # DeepSeek (fallback + consensus)
+    # Primary model selection: "deepseek" or "kimi"
+    primary_model: str = "deepseek"
+
+    # DeepSeek (primary)
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-coder"
+    deepseek_model: str = "deepseek-v4-pro"
     kimi_input_price_per_1m_tokens: float | None = 0.60
     kimi_output_price_per_1m_tokens: float | None = 2.50
-    deepseek_input_price_per_1m_tokens: float | None = None
-    deepseek_output_price_per_1m_tokens: float | None = None
+    deepseek_input_price_per_1m_tokens: float | None = 0.435
+    deepseek_output_price_per_1m_tokens: float | None = 0.87
 
     # Generic fallback model (OpenAI-compatible — provider-agnostic)
     fallback_enabled: bool = False

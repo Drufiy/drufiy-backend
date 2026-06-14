@@ -45,7 +45,8 @@ def load_cases(limit: int = 0) -> list[dict]:
     return cases[:limit] if limit else cases
 
 
-async def run_case(case: dict, live: bool, gh_token: str | None) -> CaseResult:
+async def run_case(case: dict, live: bool, gh_token: str | None, model: str = "kimi") -> CaseResult:
+    case = {**case, "_eval_model": model}
     exp = case.get("expected", {})
     investigation_context = None
     if live and gh_token:
@@ -65,7 +66,7 @@ async def run_case(case: dict, live: bool, gh_token: str | None) -> CaseResult:
             iteration=1,
             run_id=None,
             current_files=case.get("current_files") or None,
-            model="kimi",
+            model=case.get("_eval_model", "kimi"),
             investigation_context=investigation_context,
         )
     except (DiagnosisValidationError, Exception) as e:  # noqa: BLE001 — eval must never crash
@@ -97,12 +98,12 @@ async def main_async(args) -> None:
         print(f"No cases in {CASES_DIR}. Run:  python -m evals.seed_from_db")
         return
 
-    print(f"Running {len(cases)} cases (concurrency={args.concurrency}, live={args.live}) ...")
+    print(f"Running {len(cases)} cases  model={args.model}  concurrency={args.concurrency}  live={args.live}")
     sem = asyncio.Semaphore(args.concurrency)
 
     async def _guarded(c):
         async with sem:
-            r = await run_case(c, args.live, args.gh_token)
+            r = await run_case(c, args.live, args.gh_token, model=args.model)
             mark = "✓" if r.valid_diagnosis else "✗"
             print(f"  {mark} {r.case_id} ({r.source})  {r.latency_ms}ms"
                   + (f"  cat={r.predicted_category}/{r.expected_category}" if r.valid_diagnosis and r.source == "verified" else ""))
@@ -151,6 +152,7 @@ def main() -> None:
     ap.add_argument("--baseline", type=str, default="")
     ap.add_argument("--live", action="store_true", help="exercise the agentic loop (needs GH_TOKEN)")
     ap.add_argument("--gh-token", type=str, default=os.environ.get("GH_TOKEN"))
+    ap.add_argument("--model", type=str, default="auto", help="model to evaluate: auto | kimi | deepseek-v4-pro | deepseek-v4-flash")
     asyncio.run(main_async(ap.parse_args()))
 
 

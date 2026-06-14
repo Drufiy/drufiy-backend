@@ -119,7 +119,7 @@ async def process_failure(ci_run_id: str):
         # ── 5. Diagnose ──────────────────────────────────────────────────────
         try:
             diagnosis = await diagnose_failure(
-                model="kimi",
+                model="auto",
                 logs=logs,
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
@@ -283,7 +283,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
 
         try:
             diagnosis = await diagnose_failure(
-                model="kimi",
+                model="auto",
                 logs=new_logs,
                 repo_full_name=repo_full_name,
                 commit_message=commit_message,
@@ -868,7 +868,7 @@ and is unlikely to introduce a new breakage.
             tool_schema=SANITY_REVIEW_TOOL,
             run_id=ci_run_id,
             call_type="sanity_review",
-            model="kimi",
+            model="auto",
         )
     except Exception as e:
         logger.warning(f"Sanity review failed for run {ci_run_id}: {e}")

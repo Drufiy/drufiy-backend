@@ -283,6 +283,63 @@ async def _call_kimi(messages: list, tool_schema: dict):
     return args, combined_raw, _merge_usage(reasoning_usage, structured_usage)
 
 
+async def _call_deepseek(model: str, messages: list, tool_schema: dict):
+    """
+    Single-call native pattern for DeepSeek V4: thinking is ON by default, and the
+    model reasons AND emits the structured tool call in one coherent pass.
+
+    We deliberately do NOT force tool_choice — DeepSeek rejects forced tool_choice in
+    thinking mode ("Thinking mode does not support this tool_choice"). tool_choice="auto"
+    keeps the reasoning in the model's own context as it produces the diagnosis, which
+    is strictly better than splitting reasoning from the decision across two calls.
+    """
+    max_attempts = 2
+    for attempt in range(max_attempts):
+        start = time.time()
+        try:
+            response = await _create_chat(deepseek,
+                model=model,
+                messages=messages,
+                tools=[{"type": "function", "function": tool_schema}],
+                tool_choice="auto",
+                max_tokens=8000,
+                temperature=1,
+            )
+        except Exception as e:
+            if _is_transient_error(e) and attempt < max_attempts - 1:
+                logger.warning(f"DeepSeek ({model}) transient error (attempt {attempt+1}): {str(e)[:200]} — retrying after 5s")
+                await asyncio.sleep(5)
+                continue
+            logger.warning(f"DeepSeek ({model}) call failed: {str(e)[:200]}")
+            return None, str(e)[:200], {"latency_ms": int((time.time() - start) * 1000)}
+
+        latency_ms = int((time.time() - start) * 1000)
+        usage = _usage_from_response(response, latency_ms)
+        msg = response.choices[0].message
+        reasoning_content = getattr(msg, "reasoning_content", None) or ""
+        logger.info(f"DeepSeek ({model}): reasoning={len(reasoning_content)} chars, tool_calls={len(msg.tool_calls or [])}")
+
+        if msg.tool_calls:
+            try:
+                args = json.loads(msg.tool_calls[0].function.arguments)
+                return args, msg.tool_calls[0].function.arguments, usage
+            except json.JSONDecodeError:
+                raw = msg.tool_calls[0].function.arguments
+                extracted = _extract_json_from_prose(raw)
+                if extracted:
+                    return extracted, raw, usage
+                return None, raw, usage
+
+        # No tool call — model returned prose; try to recover JSON from it.
+        prose = msg.content or ""
+        extracted = _extract_json_from_prose(prose)
+        if extracted:
+            return extracted, prose, usage
+        return None, prose, usage
+
+    return None, "", {"latency_ms": 0}
+
+
 async def _call_openai_compatible_fallback(
     client: AsyncOpenAI,
     model: str,
@@ -298,6 +355,9 @@ async def _call_openai_compatible_fallback(
         return None, "", {}
     start = time.time()
     try:
+        # DeepSeek V4 models have thinking mode on by default; forced tool_choice
+        # is incompatible with thinking mode — disable it explicitly.
+        extra = {"extra_body": {"thinking": {"type": "disabled"}}} if model.startswith("deepseek-") else {}
         response = await _create_chat(client,
             model=model,
             messages=messages,
@@ -305,6 +365,7 @@ async def _call_openai_compatible_fallback(
             tool_choice={"type": "function", "function": {"name": tool_schema["name"]}},
             max_tokens=4000,
             temperature=1,
+            **extra,
         )
     except Exception as e:
         logger.error(f"{label} fallback failed: {e}")
@@ -338,30 +399,42 @@ async def _call_openai_compatible_fallback(
     return None, prose, usage
 
 
-async def _call_kimi_with_tools(messages: list, tools: list[dict]):
-    """Single Kimi call with multiple investigation tools enabled.
-    Retries once on transient errors."""
+async def _call_with_tools(messages: list, tools: list[dict], model: str = "auto"):
+    """Single call with multiple investigation tools enabled and native thinking.
+    Works with both Kimi and DeepSeek. Retries once on transient errors."""
+    use_deepseek = model.startswith("deepseek-") or (model == "auto" and settings.primary_model == "deepseek")
+    client = deepseek if use_deepseek else kimi
+    model_id = (model if model.startswith("deepseek-") else settings.deepseek_model) if use_deepseek else settings.kimi_model
+
+    if use_deepseek and not client:
+        logger.warning("DeepSeek client not configured — falling back to Kimi for investigation")
+        client = kimi
+        model_id = settings.kimi_model
+        use_deepseek = False
+
+    # DeepSeek: thinking is on by default, tool_choice="auto" is compatible.
+    # Kimi: thinking via extra_body.
+    extra = {} if use_deepseek else {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 1500}}}
+
     max_attempts = 2
     for attempt in range(max_attempts):
         start = time.time()
         try:
-            response = await _create_chat(kimi,
-                model=settings.kimi_model,
+            response = await _create_chat(client,
+                model=model_id,
                 messages=messages,
                 tools=[{"type": "function", "function": tool} for tool in tools],
-                max_tokens=4000,
+                tool_choice="auto",
+                max_tokens=8000 if use_deepseek else 4000,
                 temperature=1,
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": 1500}},
+                **extra,
             )
         except Exception as e:
             if _is_recoverable_model_error(e) and not _is_transient_error(e):
-                logger.warning(f"Kimi investigation call recoverable error: {str(e)[:200]}")
+                logger.warning(f"{model_id} investigation call recoverable error: {str(e)[:200]}")
                 return None, "", {"latency_ms": int((time.time() - start) * 1000)}
             if _is_transient_error(e) and attempt < max_attempts - 1:
-                logger.warning(
-                    f"Kimi investigation transient error (attempt {attempt + 1}/{max_attempts}): "
-                    f"{str(e)[:200]} — retrying after 5s"
-                )
+                logger.warning(f"{model_id} investigation transient error (attempt {attempt+1}): {str(e)[:200]} — retrying after 5s")
                 await asyncio.sleep(5)
                 continue
             raise
@@ -441,7 +514,11 @@ async def call_with_investigation(
     run_id: str | None = None,
     call_type: str = "diagnosis",
     max_steps: int = 4,
+    model: str = "auto",
 ) -> dict:
+    use_deepseek = model.startswith("deepseek-") or (model == "auto" and settings.primary_model == "deepseek")
+    model_id = (model if model.startswith("deepseek-") else settings.deepseek_model) if use_deepseek else settings.kimi_model
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
@@ -449,11 +526,11 @@ async def call_with_investigation(
     all_tools = investigation_tools + [diagnosis_tool_schema]
 
     for step in range(max_steps):
-        message, raw, usage = await _call_kimi_with_tools(messages, all_tools)
+        message, raw, usage = await _call_with_tools(messages, all_tools, model=model)
 
         if not message or not message.tool_calls:
             _log_agent_call(
-                run_id, f"{call_type}_step_{step + 1}", settings.kimi_model,
+                run_id, f"{call_type}_step_{step + 1}", model_id,
                 messages, raw, None, usage, valid=False,
                 error="no tool call — nudging",
             )
@@ -472,7 +549,7 @@ async def call_with_investigation(
 
         if tool_name == diagnosis_tool_schema["name"]:
             _log_agent_call(
-                run_id, f"{call_type}_step_{step + 1}", settings.kimi_model,
+                run_id, f"{call_type}_step_{step + 1}", model_id,
                 messages, raw, tool_args, usage, valid=True,
             )
             return tool_args
@@ -500,15 +577,19 @@ async def call_with_investigation(
             "content": tool_result,
         })
         _log_agent_call(
-            run_id, f"{call_type}_step_{step + 1}", settings.kimi_model,
+            run_id, f"{call_type}_step_{step + 1}", model_id,
             messages, raw, {"tool": tool_name}, usage, valid=True,
         )
 
+    # Max steps exhausted — force a final structured call.
     final_messages = messages + [{"role": "user", "content":
         "Investigation complete. Submit your structured diagnosis now using submit_diagnosis."}]
-    args, raw, usage = await _call_kimi_structured(final_messages, diagnosis_tool_schema)
+    if use_deepseek:
+        args, raw, usage = await _call_deepseek(model_id, final_messages, diagnosis_tool_schema)
+    else:
+        args, raw, usage = await _call_kimi_structured(final_messages, diagnosis_tool_schema)
     _log_agent_call(
-        run_id, f"{call_type}_final", settings.kimi_model,
+        run_id, f"{call_type}_final", model_id,
         final_messages, raw, args, usage,
         valid=(args is not None),
         error=None if args else "forced final produced no tool call",
@@ -534,7 +615,21 @@ async def call_with_tool(
         {"role": "user", "content": user_prompt},
     ]
 
-    # Attempt 1: Kimi K2.6
+    # Resolve "auto" to the configured primary model
+    if model == "auto":
+        model = settings.deepseek_model if settings.primary_model == "deepseek" else "kimi"
+
+    # DeepSeek primary path — single-call native thinking
+    if model.startswith("deepseek-"):
+        args, raw, usage = await _call_deepseek(model, messages, tool_schema)
+        _log_agent_call(run_id, call_type, model, messages, raw, args, usage,
+                        valid=(args is not None), error="No tool call" if args is None else None)
+        if args is not None:
+            return args
+        # DeepSeek failed — fall through to Kimi as cross-provider fallback
+        logger.warning(f"DeepSeek {model} returned no valid tool call — trying Kimi fallback")
+
+    # Kimi path (primary if configured, or fallback if DeepSeek failed)
     args, raw, usage = await _call_kimi(messages, tool_schema)
     _log_agent_call(run_id, call_type, settings.kimi_model, messages, raw, args, usage,
                     valid=(args is not None), error="No tool call in response" if args is None else None)
