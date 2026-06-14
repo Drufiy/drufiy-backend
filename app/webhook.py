@@ -123,9 +123,10 @@ async def handle_verification_event(payload: dict):
     ci_run_id = ci_run["id"]
     repo = ci_run["connected_repos"]
 
-    # Also allow "applying" — race condition where fix branch CI completes
-    # before the backend finishes updating status from applying → fixed
-    if ci_run["status"] not in ("fixed", "waiting_verification", "applying"):
+    # Accept verification events during any "fix in progress" state.
+    # Race conditions: fix branch CI may complete before status transitions finish.
+    allowed = ("fixed", "waiting_verification", "applying", "diagnosing", "diagnosed")
+    if ci_run["status"] not in allowed and not ci_run["status"].startswith("iteration_"):
         logger.info(f"Verification event ignored — ci_run {ci_run_id} status={ci_run['status']}")
         return
 
@@ -239,7 +240,7 @@ async def handle_verification_event(payload: dict):
             )
             previous_diagnosis = prev_diag_result.data[0] if prev_diag_result.data else {}
             max_iteration = previous_diagnosis.get("iteration", 1)
-            if max_iteration >= 2:
+            if max_iteration >= 3:
                 logger.info(f"Some workflows failed and run {ci_run_id} is already at iteration {max_iteration} → exhausted")
                 supabase.table("ci_runs").update({
                     "status": "exhausted",
@@ -253,6 +254,7 @@ async def handle_verification_event(payload: dict):
             logger.info(f"Some workflows failed — triggering iteration {next_iteration} for run {ci_run_id}")
             supabase.table("ci_runs").update({
                 "status": f"iteration_{next_iteration}",
+                "verification_workflows": [],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", ci_run_id).execute()
 

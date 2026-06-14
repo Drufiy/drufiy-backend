@@ -16,7 +16,7 @@ from app.agent.log_fetcher import (
     LogsNotAvailableError,
     fetch_workflow_logs,
 )
-from app.agent.pr_creator import PRCreationError, apply_unified_patch, create_fix_pr
+from app.agent.pr_creator import PRCreationError, apply_unified_patch, create_fix_pr, push_fix_to_branch
 from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
@@ -316,24 +316,46 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         _update_status(ci_run_id, "diagnosed")
         logger.info(f"Iteration {next_iteration} diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type}")
 
-        # Follow-up iterations: only auto-apply if very high confidence.
-        if (
-            diagnosis.fix_type == "safe_auto_apply"
+        fix_branch = ci_run.get("fix_branch_name")
+        can_auto_apply = (
+            diagnosis.fix_type in ("safe_auto_apply", "review_recommended")
             and not diagnosis.is_flaky_test
-            and diagnosis.confidence >= 0.9
-        ):
+            and diagnosis.confidence >= 0.6
+            and diagnosis.files_changed
+        )
+
+        if can_auto_apply and fix_branch:
             access_token = await get_repo_access_token(repo)
             if access_token:
-                await _apply_fix(
-                    ci_run_id,
-                    repo_full_name,
-                    access_token,
-                    repo["id"],
-                    diagnosis_row,
-                    diagnosis,
-                    base_branch=ci_run.get("branch") or repo.get("default_branch", "main"),
-                    base_sha=None,
+                prev_pr = (
+                    supabase.table("diagnoses")
+                    .select("github_pr_number")
+                    .eq("run_id", ci_run_id)
+                    .order("iteration", desc=True)
+                    .limit(1)
+                    .execute()
                 )
+                pr_number = (prev_pr.data[0].get("github_pr_number") if prev_pr.data else None)
+
+                try:
+                    logger.info(f"Iteration {next_iteration} — pushing retry fix to existing branch {fix_branch}")
+                    await push_fix_to_branch(
+                        repo_full_name=repo_full_name,
+                        access_token=access_token,
+                        branch_name=fix_branch,
+                        diagnosis=diagnosis_row,
+                        iteration=next_iteration,
+                        pr_number=pr_number,
+                    )
+                    supabase.table("ci_runs").update({
+                        "status": "fixed",
+                        "verification_workflows": [],
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", ci_run_id).execute()
+                    logger.info(f"Iteration {next_iteration} fix pushed to {fix_branch} for run {ci_run_id}")
+                except PRCreationError as e:
+                    logger.error(f"Iteration {next_iteration} push failed for run {ci_run_id}: {e}")
+                    await _mark_failed(ci_run_id, "exhausted", f"Retry fix push failed: {str(e)[:200]}")
 
     except Exception as e:
         logger.exception(f"process_iteration_2 crashed run_id={ci_run_id}: {e}")

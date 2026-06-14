@@ -224,6 +224,43 @@ def apply_unified_patch(current_content: str, patch_text: str) -> str:
     return "".join(output)
 
 
+async def push_fix_to_branch(
+    repo_full_name: str,
+    access_token: str,
+    branch_name: str,
+    diagnosis: dict,
+    iteration: int,
+    pr_number: int | None = None,
+) -> dict:
+    """Push a retry fix to an existing fix branch. No new branch, no new PR."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+        for file_change in (diagnosis.get("files_changed") or []):
+            await _put_file(client, repo_full_name, branch_name, file_change)
+
+        if pr_number:
+            comment_body = (
+                f"## 🔄 Drufiy Retry — Iteration {iteration}\n\n"
+                f"CI failed on the previous fix. Prash re-diagnosed and pushed a new commit.\n\n"
+                f"**Updated Root Cause**\n{diagnosis.get('root_cause', 'N/A')}\n\n"
+                f"**Updated Fix**\n{diagnosis.get('fix_description', 'N/A')}\n\n"
+                f"**Files Changed**\n"
+                + "\n".join(f"- `{f['path']}` — {f['explanation']}" for f in (diagnosis.get("files_changed") or []))
+                + f"\n\n**Confidence:** {int((diagnosis.get('confidence') or 0) * 100)}%"
+            )
+            await client.post(
+                f"{GITHUB_API}/repos/{repo_full_name}/issues/{pr_number}/comments",
+                json={"body": comment_body},
+            )
+
+    return {"branch": branch_name}
+
+
 def _pr_title(diagnosis):
     speculative_tag = "[SPECULATIVE] " if diagnosis.get("speculative") else ""
     return f"{speculative_tag}fix: {diagnosis['problem_summary'][:60]} [Drufiy]"

@@ -972,7 +972,8 @@ def _build_user_prompt(
             "  1. What the previous diagnosis got wrong or missed\n"
             "  2. Whether the original root cause was misidentified, or the fix was incomplete\n"
             "  3. A new fix that addresses both the original and the new failure\n\n"
-            f"If you cannot confidently fix this on iteration {iteration}, set fix_type='manual_required'."
+            "DO NOT give up — you MUST produce a files_changed fix attempt. "
+            "Your fix will be pushed to the same branch for CI verification."
         )
 
     return "\n".join(parts)
