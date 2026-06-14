@@ -629,6 +629,20 @@ async def diagnose_failure(
             model=model,
         )
 
+    # Filter out files with empty/missing content before validation.
+    # The model sometimes returns new_content="" for files it couldn't generate —
+    # drop those rather than letting one bad file nuke the entire diagnosis.
+    if "files_changed" in raw_args and raw_args["files_changed"]:
+        valid_files = []
+        for fc in raw_args["files_changed"]:
+            content = fc.get("new_content") or ""
+            patch = fc.get("patch") or ""
+            if content.strip() or patch.strip():
+                valid_files.append(fc)
+            else:
+                logger.warning(f"Dropping file {fc.get('path', '?')} — empty new_content and no patch")
+        raw_args["files_changed"] = valid_files
+
     try:
         diagnosis = Diagnosis(**raw_args)
     except ValidationError as e:
