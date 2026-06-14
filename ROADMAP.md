@@ -133,7 +133,10 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 1. **Tight status gate** — only `"fixed"` and `"applying"` statuses pass the guard (`webhook.py:128`)
 2. **Atomic iteration claim** — `.eq("status", "fixed")` WHERE clause on the update ensures only ONE concurrent handler transitions to `iteration_N`. If `claim.data` is empty, another handler already won → bail early (`webhook.py:255-262`)
 
-**Status:** Fixed, committed (`ae09f9e`), deploying.
+**Status:** Fixed and verified. Deployed as `drufiy-backend-00120-7dj`.
+
+**Verification test (3-layer bug):** Missing `types.ts` + missing `validators.ts` + `calculateDiscount` signature mismatch.
+Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) → validators.ts (iter 2, CI fail) → main.ts (iter 3, CI pass → auto-merged). Zero duplicate PRs.
 
 ---
 
@@ -240,7 +243,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** deploying race-condition fix (asia-south1)
+**Cloud Run:** `drufiy-backend-00120-7dj` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
