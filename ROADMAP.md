@@ -75,7 +75,7 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 | B3 | Multi-model consensus on `unknown` category | **NOT STARTED** — DeepSeek is now primary, Kimi is fallback; consensus logic not wired | P2 |
 | B4 | Speculative PRs for low confidence | **NOT STARTED** — still downgrades to `manual_required` | P2 |
 | C4 | Patch format for file changes | **REVERSED** — prompt now requires `new_content`, `patch` deprecated. Correct decision: patches are fragile | N/A |
-| D1 | Increase iterations 2→4 | **NOT CONFIRMED** — need to check max iteration cap | P2 |
+| D1 | Increase iterations 3→4 | **PARTIAL** — raised from 2→3 in self-verification loop. Consider 4 after data shows it helps | P3 |
 | D2 | Parallel model calls (speed) | **NOT STARTED** — current: sequential primary→fallback | P3 |
 | E1 | Slack/Discord alerts | **NOT STARTED** — no `_notify` function | P2 |
 | E4 | Guard against Cloud Run scale-down | **DONE** via reconciler sweeps | Done |
@@ -119,6 +119,21 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 - Race condition fixes in webhook status transitions
 
 **Live test result:** Two-layer TypeScript bug (missing `applyTax` + missing `TaxConfig`). Prash fixed utils.ts (iteration 1, CI failed), then auto-retried and created config.ts (iteration 2, CI passed). PR #5 auto-merged with 2 commits. Deployed as `drufiy-backend-00114-pg6`.
+
+### Critical Bug Found & Fixed: Duplicate PR Explosion (2026-06-14)
+
+**Symptom:** 8 PRs created on hypnochic-v2 during self-verification loop test.
+
+**Root cause — triple race condition:**
+1. **Duplicate webhook events:** GitHub fires TWO `workflow_run` events per push on a fix branch (`push` + `pull_request`). Both complete simultaneously, both call `handle_verification_event`, both independently trigger `process_iteration_2` — creating duplicate branches/PRs.
+2. **Widened status gate:** During development, the allowed status set was expanded to include `diagnosing`, `diagnosed`, `iteration_*` — letting stale events slip through during in-progress iterations.
+3. **Non-atomic iteration claim:** The read-then-write pattern in `handle_verification_event` had no locking — two concurrent handlers could both read `status="fixed"`, both compute `next_iteration=2`, and both fire `process_iteration_2`.
+
+**Fix (two layers):**
+1. **Tight status gate** — only `"fixed"` and `"applying"` statuses pass the guard (`webhook.py:128`)
+2. **Atomic iteration claim** — `.eq("status", "fixed")` WHERE clause on the update ensures only ONE concurrent handler transitions to `iteration_N`. If `claim.data` is empty, another handler already won → bail early (`webhook.py:255-262`)
+
+**Status:** Fixed, committed (`ae09f9e`), deploying.
 
 ---
 
@@ -198,7 +213,7 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 |------|-------------|------|
 | B3 — Multi-model consensus | Fire both DeepSeek + Kimi on `unknown` or low-confidence, take agreement | IMPROVEMENTS.md |
 | B4 — Speculative PRs | Never return `manual_required` for code failures — create `[SPECULATIVE]` PR instead | IMPROVEMENTS.md |
-| D1 — Increase iterations 2→4 | More retry attempts before exhausted | IMPROVEMENTS.md |
+| D1 — Increase iterations 3→4 | Currently at 3 (raised from 2), consider 4 | IMPROVEMENTS.md |
 | D2 — Parallel model calls | Fire both models simultaneously, take first valid | IMPROVEMENTS.md |
 | E1 — Slack/Discord alerts | `_notify` on consecutive failures, fallback triggers, signups | IMPROVEMENTS.md |
 | F — GitHub App full migration | Replace OAuth as primary auth, enable marketplace | IMPROVEMENTS.md |
@@ -225,7 +240,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00111-fdt` (asia-south1)
+**Cloud Run:** deploying race-condition fix (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
@@ -268,8 +283,9 @@ After PR is created:
     → workflow_run webhook → handle_verification_event
     → If all pass → status = "verified"
         → If auto_merge enabled → merge PR automatically
-    → If any fail → status = "iteration_2" → process_iteration_2
-        → max 2 iterations → "exhausted"
+    → If any fail → atomic claim (WHERE status="fixed") → status = "iteration_N"
+        → process_iteration_2 → push retry to same branch
+        → max 3 iterations → "exhausted"
     ⚠️ GAP: no active watching of fix branch CI — relies on webhook delivery
 
 Reconciler (every 60s):
