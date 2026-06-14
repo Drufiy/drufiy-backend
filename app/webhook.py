@@ -123,10 +123,9 @@ async def handle_verification_event(payload: dict):
     ci_run_id = ci_run["id"]
     repo = ci_run["connected_repos"]
 
-    # Accept verification events during any "fix in progress" state.
-    # Race conditions: fix branch CI may complete before status transitions finish.
-    allowed = ("fixed", "waiting_verification", "applying", "diagnosing", "diagnosed")
-    if ci_run["status"] not in allowed and not ci_run["status"].startswith("iteration_"):
+    # Only process verification events when the run is waiting for fix branch CI.
+    # Tight gate: only "fixed" and "applying" (race where CI finishes before status update).
+    if ci_run["status"] not in ("fixed", "applying"):
         logger.info(f"Verification event ignored — ci_run {ci_run_id} status={ci_run['status']}")
         return
 
@@ -251,12 +250,17 @@ async def handle_verification_event(payload: dict):
                 return
 
             next_iteration = max_iteration + 1
-            logger.info(f"Some workflows failed — triggering iteration {next_iteration} for run {ci_run_id}")
-            supabase.table("ci_runs").update({
+            # Atomic claim: only transition if status is still "fixed".
+            # Prevents duplicate iteration triggers from concurrent webhook events.
+            claim = supabase.table("ci_runs").update({
                 "status": f"iteration_{next_iteration}",
                 "verification_workflows": [],
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", ci_run_id).execute()
+            }).eq("id", ci_run_id).eq("status", "fixed").execute()
+            if not claim.data:
+                logger.info(f"Iteration {next_iteration} claim lost (another handler got it) for run {ci_run_id}")
+                return
+            logger.info(f"Some workflows failed — triggering iteration {next_iteration} for run {ci_run_id}")
 
             # Fetch logs from the failed run on the fix branch
             failed_run = next((r for r in completed_runs if r.get("conclusion") != "success"), None)
