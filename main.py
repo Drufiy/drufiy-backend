@@ -51,12 +51,22 @@ def _recover_stuck_runs():
 
 # ── Fix 3: pre-warm Kimi so the first real diagnosis isn't slow ───────────────
 
-async def _prewarm_kimi():
-    """
-    Send a trivial 1-token completion to Kimi at startup.
-    This establishes the HTTP connection pool and warms any provider-side
-    caching, so the first real diagnosis doesn't pay a cold-start penalty.
-    """
+async def _prewarm_models():
+    """Pre-warm HTTP connection pools for primary + fallback models."""
+    # DeepSeek (primary)
+    try:
+        from app.agent.kimi_client import deepseek
+        if deepseek:
+            await deepseek.chat.completions.create(
+                model=settings.deepseek_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+            logger.info("DeepSeek pre-warm complete ✓")
+    except Exception as e:
+        logger.warning(f"DeepSeek pre-warm failed (non-fatal): {e}")
+
+    # Kimi (fallback)
     try:
         from app.agent.kimi_client import kimi
         await kimi.chat.completions.create(
@@ -90,8 +100,8 @@ async def lifespan(app: FastAPI):
     # Sync recovery of runs stuck mid-pipeline after restart
     _recover_stuck_runs()
 
-    # Async pre-warm Kimi connection pool
-    asyncio.create_task(_prewarm_kimi())
+    # Pre-warm primary (DeepSeek) + fallback (Kimi) connection pools
+    asyncio.create_task(_prewarm_models())
 
     # Verification reconciler — auto-resolves spinners every 60s
     asyncio.create_task(_reconciler_loop())
