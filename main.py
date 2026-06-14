@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 def _recover_stuck_runs():
     """
-    Any run stuck in 'diagnosing' or 'applying' for > 5 minutes was almost
-    certainly abandoned when the server died mid-pipeline.  Reset them to
-    'pending' so the next webhook event (or a manual retry) can re-queue them.
+    Log any runs stuck in transient states at startup.
+    Actual recovery is handled by the async reconciler loop which checks
+    for existing PRs before re-queuing (avoids overwriting verified runs).
     """
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
@@ -36,17 +36,11 @@ def _recover_stuck_runs():
             .execute()
         )
         if stuck.data:
-            ids = [r["id"] for r in stuck.data]
-            supabase.table("ci_runs").update({
-                "status": "pending",
-                "error_message": "Auto-recovered after server restart (was stuck in-progress)",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }).in_("id", ids).execute()
-            logger.info(f"Recovered {len(ids)} stuck run(s): {ids}")
+            logger.info(f"Found {len(stuck.data)} stuck run(s) at startup — reconciler will handle them")
         else:
             logger.info("No stuck runs found — clean startup")
     except Exception as e:
-        logger.warning(f"Stuck-run recovery failed (non-fatal): {e}")
+        logger.warning(f"Stuck-run recovery check failed (non-fatal): {e}")
 
 
 # ── Fix 3: pre-warm Kimi so the first real diagnosis isn't slow ───────────────

@@ -225,25 +225,36 @@ async def _recover_stuck_diagnosing(cutoff: str) -> int:
     for run in stuck_runs:
         ci_run_id = run["id"]
         try:
-            # Check if a diagnosis already exists — if so, don't re-run process_failure
-            # (that would create a duplicate iteration=1 and violate the DB constraint)
+            # Check if a diagnosis with a PR already exists — if so, the fix was
+            # already applied. Don't re-run process_failure (would create duplicate PRs
+            # or overwrite a verified status after the background task finishes).
             existing_diag = (
                 supabase.table("diagnoses")
-                .select("id, iteration")
+                .select("id, iteration, github_pr_number")
                 .eq("run_id", ci_run_id)
+                .order("iteration", desc=True)
                 .limit(1)
                 .execute()
             )
             if existing_diag.data:
-                logger.info(
-                    f"Reconciler: run {ci_run_id[:8]} already has a diagnosis "
-                    f"(iteration={existing_diag.data[0]['iteration']}) — marking as diagnosed instead of re-processing"
-                )
-                supabase.table("ci_runs").update({
-                    "status": "diagnosed",
-                    "error_message": "Auto-recovered after server restart (was stuck in diagnosing)",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", ci_run_id).execute()
+                diag = existing_diag.data[0]
+                if diag.get("github_pr_number"):
+                    logger.info(
+                        f"Reconciler: run {ci_run_id[:8]} already has PR #{diag['github_pr_number']} — marking verified"
+                    )
+                    supabase.table("ci_runs").update({
+                        "status": "verified",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", ci_run_id).execute()
+                else:
+                    logger.info(
+                        f"Reconciler: run {ci_run_id[:8]} has diagnosis (iteration={diag['iteration']}) but no PR — marking diagnosed"
+                    )
+                    supabase.table("ci_runs").update({
+                        "status": "diagnosed",
+                        "error_message": "Auto-recovered after server restart (was stuck in diagnosing)",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", ci_run_id).execute()
                 resolved += 1
                 continue
 
