@@ -193,17 +193,16 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 
 ---
 
-### Session N+4: Deeper CI/CD — Release Pipelines + Flaky Tests
+### ~~Session N+4: Deeper CI/CD — Release Pipelines + Flaky Tests~~ — DONE (2026-06-15)
 
-**Why (user's answer):** Next expansion is deeper into CI/CD before touching production.
+**All 4 items shipped.** Deployed as `drufiy-backend-00137-f92`.
 
-**What to build:**
-1. **Flaky test detection + tracking** — track tests that fail-then-pass across runs, build a flaky test database per repo
-2. **Dependency hell resolution** — when `npm install` / `pip install` fails due to version conflicts, parse the conflict and propose a resolution
-3. **Release pipeline awareness** — understand deploy workflows (not just build/test), handle deploy-specific failures (image build, push, rollout)
-4. **Matrix build support** — handle multi-OS/multi-version CI matrices, identify which specific matrix entry failed
-
-**Estimated effort:** 2-3 days
+| Item | What shipped |
+|------|-------------|
+| Flaky test tracking | `flaky_tests` table, `flaky_tracker.py` (record/lookup), auto-record on rerun pass/fail, `GET /runs/admin/flaky-tests` endpoint |
+| Dependency conflict resolution | Prompt guidance for ERESOLVE/ResolutionImpossible/peer deps, few-shot examples 13-14, error regex patterns for version conflicts |
+| Release pipeline awareness | Dockerfile + docker-compose in `_MANIFEST_FILES`, Docker path extraction in `_FILE_PATH_RE`, deploy-failure error patterns, few-shot example 15, prompt section on Docker/deploy fixes |
+| Matrix build support | `_extract_matrix_summary` in log_fetcher prepends job list to logs, prompt section on matrix failure reasoning, few-shot example 16 |
 
 ---
 
@@ -243,6 +242,7 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 | Confidence recalibration | Outcome data now exists — recalibrate against actual merge/revert rates | Ready |
 | RAG upgrade — embeddings | Replace keyword RAG with semantic search over past fixes | New |
 | Learning flywheel — few-shot | Retrieve similar past failures as few-shot context in prompts | New |
+| Multi-provider CI | Support CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines — one adapter per provider (webhook + log fetcher), diagnosis pipeline stays unchanged | New |
 
 ---
 
@@ -261,7 +261,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00133-z4t` (asia-south1)
+**Cloud Run:** `drufiy-backend-00137-f92` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
