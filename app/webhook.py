@@ -260,7 +260,6 @@ async def handle_verification_event(payload: dict):
             if not claim.data:
                 logger.info(f"Iteration {next_iteration} claim lost (another handler got it) for run {ci_run_id}")
                 return
-            logger.info(f"Some workflows failed — triggering iteration {next_iteration} for run {ci_run_id}")
 
             # Fetch logs from the failed run on the fix branch
             failed_run = next((r for r in completed_runs if r.get("conclusion") != "success"), None)
@@ -276,6 +275,49 @@ async def handle_verification_event(payload: dict):
                 except Exception as e:
                     logger.warning(f"Could not fetch iteration {next_iteration} logs: {e}")
 
+            # Pre-existing failure guard: if the fix-branch CI is failing on files Prash
+            # never touched, the fix is correct — the repo had a separate latent breakage.
+            # Don't burn retries on it; surface it instead of marking the run failed.
+            changed_paths = {
+                fc.get("path", "")
+                for fc in (previous_diagnosis.get("files_changed") or [])
+                if fc.get("path")
+            }
+            if new_logs and changed_paths:
+                from app.agent.preexisting_detector import is_preexisting_failure
+                preexisting, error_files = is_preexisting_failure(new_logs, changed_paths)
+                if preexisting:
+                    files_str = ", ".join(sorted(error_files)[:5])
+                    logger.info(
+                        f"Run {ci_run_id}: fix-branch failure is pre-existing "
+                        f"(implicates {files_str}, none in Prash's changes {changed_paths}) "
+                        f"— marking fix verified, not retrying"
+                    )
+                    supabase.table("ci_runs").update({
+                        "status": "blocked_preexisting",
+                        "error_message": (
+                            f"Fix is correct, but the branch has a pre-existing failure "
+                            f"unrelated to this fix (in {files_str}). The repo needs a separate "
+                            f"fix for that issue before this PR can merge."
+                        ),
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", ci_run_id).execute()
+                    mark_agent_run_outcome(ci_run_id, "blocked_preexisting")
+                    latest_diag = (
+                        supabase.table("diagnoses")
+                        .select("id")
+                        .eq("run_id", ci_run_id)
+                        .order("iteration", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                    if latest_diag.data:
+                        supabase.table("diagnoses").update(
+                            {"verification_status": "verified"}
+                        ).eq("id", latest_diag.data[0]["id"]).execute()
+                    return
+
+            logger.info(f"Some workflows failed — triggering iteration {next_iteration} for run {ci_run_id}")
             from app.agent.processor import process_iteration_2
             await process_iteration_2(ci_run_id, new_logs, previous_diagnosis)
 
