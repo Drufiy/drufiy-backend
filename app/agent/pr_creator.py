@@ -46,8 +46,11 @@ async def create_fix_pr(
 
         branch_name = await _create_branch(client, repo_full_name, run_id, base_sha)
 
-        for file_change in (diagnosis.get("files_changed") or []):
-            await _put_file(client, repo_full_name, branch_name, file_change)
+        await _commit_files_atomic(
+            client, repo_full_name, branch_name,
+            diagnosis.get("files_changed") or [],
+            "fix: drufiy auto-fix",
+        )
 
         pr = await _post(
             client,
@@ -111,6 +114,69 @@ async def _create_branch(client, repo_full_name, run_id, base_sha) -> str:
             continue
         _raise_github_error(resp, f"Failed to create branch {branch}")
     raise PRCreationError("Could not create fix branch after 2 attempts")
+
+
+async def _commit_files_atomic(
+    client, repo_full_name: str, branch: str,
+    file_changes: list[dict], message: str,
+):
+    """Commit all file changes as a single atomic commit using the Git Tree API."""
+    ref_info = await _get(client, f"{GITHUB_API}/repos/{repo_full_name}/git/refs/heads/{branch}")
+    head_sha = ref_info["object"]["sha"]
+
+    commit_info = await _get(client, f"{GITHUB_API}/repos/{repo_full_name}/git/commits/{head_sha}")
+    base_tree_sha = commit_info["tree"]["sha"]
+
+    tree_items = []
+    for fc in file_changes:
+        path = fc["path"]
+        new_content = fc.get("new_content")
+        if new_content is None:
+            raise PRCreationError(f"Failed to materialize content for {path}")
+
+        blob_resp = await client.post(
+            f"{GITHUB_API}/repos/{repo_full_name}/git/blobs",
+            json={"content": new_content, "encoding": "utf-8"},
+        )
+        if blob_resp.status_code == 403 and path.startswith(".github/workflows/"):
+            raise PRCreationError(
+                "WORKFLOW_SCOPE_REQUIRED: editing workflow files needs the GitHub 'workflow' "
+                "scope. The user must reconnect and grant it, or use the GitHub App integration."
+            )
+        if blob_resp.status_code not in (200, 201):
+            _raise_github_error(blob_resp, f"Failed to create blob for {path}")
+
+        tree_items.append({
+            "path": path,
+            "mode": "100644",
+            "type": "blob",
+            "sha": blob_resp.json()["sha"],
+        })
+
+    tree_resp = await client.post(
+        f"{GITHUB_API}/repos/{repo_full_name}/git/trees",
+        json={"base_tree": base_tree_sha, "tree": tree_items},
+    )
+    if tree_resp.status_code not in (200, 201):
+        _raise_github_error(tree_resp, "Failed to create tree")
+
+    commit_resp = await client.post(
+        f"{GITHUB_API}/repos/{repo_full_name}/git/commits",
+        json={
+            "message": message,
+            "tree": tree_resp.json()["sha"],
+            "parents": [head_sha],
+        },
+    )
+    if commit_resp.status_code not in (200, 201):
+        _raise_github_error(commit_resp, "Failed to create commit")
+
+    ref_resp = await client.patch(
+        f"{GITHUB_API}/repos/{repo_full_name}/git/refs/heads/{branch}",
+        json={"sha": commit_resp.json()["sha"]},
+    )
+    if ref_resp.status_code != 200:
+        _raise_github_error(ref_resp, "Failed to update branch ref")
 
 
 async def _put_file(client, repo_full_name, branch, file_change):
@@ -238,8 +304,11 @@ async def push_fix_to_branch(
     }
 
     async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
-        for file_change in (diagnosis.get("files_changed") or []):
-            await _put_file(client, repo_full_name, branch_name, file_change)
+        await _commit_files_atomic(
+            client, repo_full_name, branch_name,
+            diagnosis.get("files_changed") or [],
+            f"fix: drufiy auto-fix — iteration {iteration}",
+        )
 
         if pr_number:
             comment_body = (
