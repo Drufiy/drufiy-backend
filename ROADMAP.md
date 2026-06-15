@@ -239,6 +239,7 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 | F — GitHub App full migration | Replace OAuth as primary auth, enable marketplace | IMPROVEMENTS.md |
 | G1 — Pre-emptive fix on push | Detect failures before CI runs via static analysis | IMPROVEMENTS.md |
 | G3 — Slack/Discord bot | Interactive fix buttons in Slack/Discord | IMPROVEMENTS.md |
+| Multi-CI provider support | Add adapters for CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines. ~1-1.5 days per provider. Core pipeline is CI-agnostic — each adapter needs: webhook route, log fetcher, connect/setup flow. Keep GitHub Actions as default | New |
 | Confidence recalibration | Outcome data now exists — recalibrate against actual merge/revert rates | Ready |
 | RAG upgrade — embeddings | Replace keyword RAG with semantic search over past fixes | New |
 | Learning flywheel — few-shot | Retrieve similar past failures as few-shot context in prompts | New |
