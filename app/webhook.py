@@ -475,7 +475,11 @@ async def github_webhook(
     body = await request.body()
 
     if not verify_signature(body, x_hub_signature_256):
-        logger.warning(f"Invalid webhook signature from {request.client.host if request.client else 'unknown'}")
+        client_ip = request.client.host if request.client else "unknown"
+        if client_ip.startswith("169.254."):
+            logger.debug(f"Health-check probe from {client_ip} — ignoring")
+        else:
+            logger.warning(f"Invalid webhook signature from {client_ip}")
         return JSONResponse(status_code=401, content={"error": "invalid_signature"})
 
     if not x_github_event:

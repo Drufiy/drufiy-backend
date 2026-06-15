@@ -8,7 +8,7 @@ import httpx
 
 from app.agent.diagnosis_agent import diagnose_failure
 from app.agent.pr_creator import create_fix_pr
-from app.agent.processor import _fetch_commit_diff, _materialize_patch_file_changes
+from app.agent.processor import _fetch_commit_diff
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_repo_access_token
@@ -72,13 +72,6 @@ async def handle_push_event(payload: dict):
             "default_branch": commit_sha or repo.get("default_branch", "main"),
         },
     )
-    await _materialize_patch_file_changes(
-        diagnosis=diagnosis,
-        repo_full_name=repo_full_name,
-        access_token=access_token,
-        default_branch=commit_sha or repo.get("default_branch", "main"),
-    )
-
     diagnosis_row = _store_push_diagnosis(ci_run_id, diagnosis)
     if diagnosis.fix_type == "manual_required" or not diagnosis.files_changed:
         supabase.table("ci_runs").update({

@@ -134,12 +134,6 @@ DIAGNOSIS_TOOL = {
                                 "Change ONLY what's needed — preserve style, indentation, unrelated code."
                             ),
                         },
-                        "patch": {
-                            "type": "string",
-                            "description": (
-                                "DEPRECATED — do NOT use. Always provide new_content instead."
-                            ),
-                        },
                         "explanation": {
                             "type": "string",
                             "description": "1-2 sentences: what specifically changed and why.",
@@ -636,11 +630,10 @@ async def diagnose_failure(
         valid_files = []
         for fc in raw_args["files_changed"]:
             content = fc.get("new_content") or ""
-            patch = fc.get("patch") or ""
-            if content.strip() or patch.strip():
+            if content.strip():
                 valid_files.append(fc)
             else:
-                logger.warning(f"Dropping file {fc.get('path', '?')} — empty new_content and no patch")
+                logger.warning(f"Dropping file {fc.get('path', '?')} — empty new_content")
         raw_args["files_changed"] = valid_files
 
     try:

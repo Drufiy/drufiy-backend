@@ -16,7 +16,7 @@ from app.agent.log_fetcher import (
     LogsNotAvailableError,
     fetch_workflow_logs,
 )
-from app.agent.pr_creator import PRCreationError, apply_unified_patch, create_fix_pr, push_fix_to_branch
+from app.agent.pr_creator import PRCreationError, create_fix_pr, push_fix_to_branch
 from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
@@ -116,32 +116,33 @@ async def process_failure(ci_run_id: str):
         # RAG: fetch past verified fixes for this repo as few-shot context
         similar_fixes = _fetch_similar_fixes(repo["id"])
 
-        # ── 5. Diagnose ──────────────────────────────────────────────────────
+        # ── 5. Diagnose (120s wall-clock cap) ────────────────────────────────
         try:
-            diagnosis = await diagnose_failure(
-                model="auto",
-                logs=logs,
-                repo_full_name=repo_full_name,
-                commit_message=commit_message,
-                workflow_name=workflow_name,
-                iteration=1,
-                run_id=ci_run_id,
-                commit_sha=commit_sha,
-                commit_diff=commit_diff or None,
-                current_files=current_files or None,
-                similar_fixes=similar_fixes or None,
-                investigation_context={
-                    "repo_full_name": repo_full_name,
-                    "access_token": access_token,
-                    "default_branch": source_ref,
-                },
+            diagnosis = await asyncio.wait_for(
+                diagnose_failure(
+                    model="auto",
+                    logs=logs,
+                    repo_full_name=repo_full_name,
+                    commit_message=commit_message,
+                    workflow_name=workflow_name,
+                    iteration=1,
+                    run_id=ci_run_id,
+                    commit_sha=commit_sha,
+                    commit_diff=commit_diff or None,
+                    current_files=current_files or None,
+                    similar_fixes=similar_fixes or None,
+                    investigation_context={
+                        "repo_full_name": repo_full_name,
+                        "access_token": access_token,
+                        "default_branch": source_ref,
+                    },
+                ),
+                timeout=120,
             )
-            await _materialize_patch_file_changes(
-                diagnosis=diagnosis,
-                repo_full_name=repo_full_name,
-                access_token=access_token,
-                default_branch=source_ref,
-            )
+        except asyncio.TimeoutError:
+            logger.error(f"Diagnosis timed out (120s wall-clock) for run {ci_run_id}")
+            await _mark_failed(ci_run_id, "diagnosis_failed", "Diagnosis timed out after 120 seconds")
+            return
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
             await _mark_failed(ci_run_id, "diagnosis_failed", str(e)[:300])
@@ -282,31 +283,32 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         similar_fixes_iter2 = _fetch_similar_fixes(repo["id"])
 
         try:
-            diagnosis = await diagnose_failure(
-                model="auto",
-                logs=new_logs,
-                repo_full_name=repo_full_name,
-                commit_message=commit_message,
-                workflow_name=workflow_name,
-                iteration=next_iteration,
-                previous_diagnosis=previous_diagnosis,
-                run_id=ci_run_id,
-                commit_sha=commit_sha,
-                commit_diff=commit_diff or None,
-                current_files=current_files_iter2 or None,
-                similar_fixes=similar_fixes_iter2 or None,
-                investigation_context={
-                    "repo_full_name": repo_full_name,
-                    "access_token": access_token_iter2,
-                    "default_branch": source_ref,
-                },
+            diagnosis = await asyncio.wait_for(
+                diagnose_failure(
+                    model="auto",
+                    logs=new_logs,
+                    repo_full_name=repo_full_name,
+                    commit_message=commit_message,
+                    workflow_name=workflow_name,
+                    iteration=next_iteration,
+                    previous_diagnosis=previous_diagnosis,
+                    run_id=ci_run_id,
+                    commit_sha=commit_sha,
+                    commit_diff=commit_diff or None,
+                    current_files=current_files_iter2 or None,
+                    similar_fixes=similar_fixes_iter2 or None,
+                    investigation_context={
+                        "repo_full_name": repo_full_name,
+                        "access_token": access_token_iter2,
+                        "default_branch": source_ref,
+                    },
+                ),
+                timeout=120,
             )
-            await _materialize_patch_file_changes(
-                diagnosis=diagnosis,
-                repo_full_name=repo_full_name,
-                access_token=access_token_iter2,
-                default_branch=source_ref,
-            )
+        except asyncio.TimeoutError:
+            logger.error(f"Iteration {next_iteration} diagnosis timed out (120s) for run {ci_run_id}")
+            await _mark_failed(ci_run_id, "exhausted", f"Iteration {next_iteration} diagnosis timed out after 120 seconds")
+            return
         except DiagnosisValidationError as e:
             logger.error(f"Iteration {next_iteration} diagnosis failed for run {ci_run_id}: {e}")
             await _mark_failed(ci_run_id, "exhausted", str(e)[:300])
@@ -890,23 +892,13 @@ and is unlikely to introduce a new breakage.
             tool_schema=SANITY_REVIEW_TOOL,
             run_id=ci_run_id,
             call_type="sanity_review",
-            model="auto",
+            model=settings.kimi_model,
         )
     except Exception as e:
         logger.warning(f"Sanity review failed for run {ci_run_id}: {e}")
         return True, f"Sanity review failed open: {e}"
 
     return bool(review.get("approve")), review.get("reason", "")
-
-
-async def _materialize_patch_file_changes(diagnosis, repo_full_name: str, access_token: str, default_branch: str):
-    for file_change in diagnosis.files_changed:
-        if file_change.new_content or not file_change.patch:
-            continue
-        current_content = await _fetch_repo_file(repo_full_name, access_token, file_change.path, default_branch)
-        if current_content is None:
-            raise DiagnosisValidationError(f"Could not fetch {file_change.path} to apply patch")
-        file_change.new_content = apply_unified_patch(current_content, file_change.patch)
 
 
 def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:

@@ -129,8 +129,6 @@ async def _put_file(client, repo_full_name, branch, file_change):
         _raise_github_error(get_resp, f"Failed to check existing file {path}")
 
     new_content = file_change.get("new_content")
-    if not new_content and file_change.get("patch"):
-        new_content = apply_unified_patch(current_content, file_change["patch"])
     if new_content is None:
         raise PRCreationError(f"Failed to materialize content for {path}")
 

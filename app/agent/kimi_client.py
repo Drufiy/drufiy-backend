@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 kimi = AsyncOpenAI(
     api_key=settings.kimi_api_key,
     base_url=settings.kimi_base_url,
-    timeout=240.0,
+    timeout=90.0,
 )
 
 deepseek = (

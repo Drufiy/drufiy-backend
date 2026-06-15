@@ -8,7 +8,6 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.agent.pr_creator import apply_unified_patch
 from app.auth import get_current_user
 from app.config import settings
 from app.db import supabase
@@ -552,13 +551,7 @@ async def dry_run(run_id: str, current_user: dict = Depends(get_current_user)):
         except Exception as e:
             logger.warning(f"Could not fetch current content for {path}: {e}")
 
-        proposed = file_change.get("new_content")
-        if not proposed and file_change.get("patch") and current_content:
-            try:
-                proposed = apply_unified_patch(current_content, file_change["patch"])
-            except Exception as e:
-                logger.warning(f"Could not apply dry-run patch for {path}: {e}")
-                proposed = ""
+        proposed = file_change.get("new_content") or ""
 
         risk = await assess_diff_risk(
             repo_id=repo["id"],
@@ -594,7 +587,6 @@ async def _run_force_fix(run_id: str, access_token: str):
     from app.agent.diagnosis_agent import diagnose_failure
     from app.agent.kimi_client import DiagnosisValidationError
     from app.agent.log_fetcher import fetch_workflow_logs
-    from app.agent.processor import _materialize_patch_file_changes
     from app.agent.pr_creator import create_fix_pr
 
     now = datetime.now(timezone.utc).isoformat()
@@ -628,12 +620,6 @@ async def _run_force_fix(run_id: str, access_token: str):
             workflow_name=ci_run.get("github_workflow_name", "CI"),
             run_id=run_id,
             force_fix=True,
-        )
-        await _materialize_patch_file_changes(
-            diagnosis=diagnosis,
-            repo_full_name=repo_full_name,
-            access_token=access_token,
-            default_branch=repo.get("default_branch", "main"),
         )
 
         # Store the new diagnosis
