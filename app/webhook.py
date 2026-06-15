@@ -8,6 +8,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.agent.external_checks import detect_external_check_failures
 from app.agent.kimi_client import mark_agent_run_outcome
 from app.config import settings
 from app.db import supabase
@@ -208,6 +209,17 @@ async def handle_verification_event(payload: dict):
             )
             if diag.data:
                 supabase.table("diagnoses").update({"verification_status": "verified"}).eq("id", diag.data[0]["id"]).execute()
+
+            # Check for failing external checks (Vercel, Netlify, etc.)
+            fix_sha = completed_runs[0]["head_sha"] if completed_runs else ""
+            if fix_sha:
+                ext_note = await detect_external_check_failures(
+                    repo_full_name, fix_sha, access_token
+                )
+                if ext_note:
+                    supabase.table("ci_runs").update({
+                        "external_checks_note": ext_note,
+                    }).eq("id", ci_run_id).execute()
 
             # Update known_good_files
             _update_known_good_files(ci_run, repo["id"])

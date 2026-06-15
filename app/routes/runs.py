@@ -74,7 +74,7 @@ def history(
     repo_ids = [r["id"] for r in repos]
     runs = (
         supabase.table("ci_runs")
-        .select("id, repo_id, branch, commit_sha, commit_message, status, fix_branch_name, created_at, updated_at")
+        .select("id, repo_id, branch, commit_sha, commit_message, status, fix_branch_name, external_checks_note, created_at, updated_at")
         .in_("repo_id", repo_ids)
         .order("created_at", desc=True)
         .range(offset, offset + limit - 1)
