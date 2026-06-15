@@ -39,7 +39,7 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 | A11 | `diagnosed` black hole → `needs_secret` state | **PARTIAL** | `required_secrets` field exists in schema. UI rendering + auto-add safe env defaults not confirmed |
 | A12 | Log preprocessing tail safety net | **DONE** | `diagnosis_agent.py:522` — appends RAW TAIL last 40 lines |
 | A13 | Source tagging (smoke_test vs user) | **DONE** | `webhook.py:494` — tags `source` on ci_run insert |
-| A14 | Sanity review → real second opinion or delete | **DONE** | `processor.py:892` — routes through `settings.kimi_model` for genuine cross-model second opinion |
+| A14 | Sanity review → real second opinion or delete | **REMOVED** | Deleted entirely — CI on fix branch is the real gate, model pre-check was redundant and added latency |
 
 ---
 
@@ -81,7 +81,7 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 | E4 | Guard against Cloud Run scale-down | **DONE** via reconciler sweeps | Done |
 | F | GitHub App full migration | **PARTIAL** — App exists, `get_installation_token` works, but not the primary auth path | P1 |
 | G1 | Pre-emptive fix on push webhook | **NOT STARTED** | P3 (future) |
-| G2 | PR review agent (cross-model sanity check) | **DONE** — A14 fixed, routes through Kimi | Done |
+| G2 | PR review agent (cross-model sanity check) | **REMOVED** — A14 deleted; CI on fix branch is the real gate | N/A |
 | G3 | Slack/Discord bot integration | **NOT STARTED** | P3 |
 
 ---
@@ -186,7 +186,7 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 |-----|-----|--------|
 | A9: Kimi client timeout still 240s | Reduced to 90s in `kimi_client.py:19` | **DONE** |
 | A9: No wall-clock cap on `diagnose_failure` | 120s `asyncio.wait_for` on both call sites in `processor.py` | **DONE** |
-| A14: Sanity check uses same model | Routes through `settings.kimi_model` for cross-model review | **DONE** |
+| A14: Sanity check uses same model | Removed entirely — CI verification is the real gate, saves ~10s per run | **REMOVED** |
 | Health-check probe noise (169.254.*) | Downgraded to `logger.debug` in `webhook.py` | **DONE** |
 | Re-run dedup swallowing new failures | Confirmed correct: dedup is by `(repo, sha, run_id)` — different workflows get different IDs | **OK** |
 | `patch` field still in schema | Removed from `schemas.py`, tool definition, `_materialize_patch_file_changes`, and all fallback paths | **DONE** |
@@ -288,7 +288,7 @@ process_failure:
     9. Category normalization via _CATEGORY_ALIASES
     10. Store diagnosis in Supabase (diagnoses table)
     11. If safe_auto_apply:
-        → _sanity_check_fix (cross-model review via Kimi)
+        → (sanity check removed — CI on fix branch is the real gate)
         → assess_diff_risk
         → create_fix_pr (branch + commit files via new_content + open PR with blame)
         → ci_run.status = "fixed"
