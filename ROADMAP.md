@@ -34,12 +34,12 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 | A6 | Fallback model (cross-provider) | **DONE** | DeepSeek primary, Kimi fallback. `call_with_tool` falls through on failure |
 | A7 | Category normalization / aliases | **DONE** | `schemas.py:4` — `_CATEGORY_ALIASES` + `_normalize_category` validator |
 | A8 | Workflow scope error + GitHub App permissions | **PARTIAL** | `pr_creator.py:148` — returns `WORKFLOW_SCOPE_REQUIRED` error. Frontend OAuth scope + full App migration still needed |
-| A9 | Latency caps (client timeout, wall-clock budget) | **PARTIAL** | DeepSeek client timeout=90s, Kimi still 240s. No `asyncio.wait_for` wall-clock cap on `diagnose_failure` |
+| A9 | Latency caps (client timeout, wall-clock budget) | **DONE** | DeepSeek 90s, Kimi 90s. 120s `asyncio.wait_for` wall-clock cap on both `diagnose_failure` call sites |
 | A10 | Reconciler: sweep `pending` + `diagnosing` + `applying` | **DONE** | `reconciler.py:56-61` — sweeps all stuck states |
 | A11 | `diagnosed` black hole → `needs_secret` state | **PARTIAL** | `required_secrets` field exists in schema. UI rendering + auto-add safe env defaults not confirmed |
 | A12 | Log preprocessing tail safety net | **DONE** | `diagnosis_agent.py:522` — appends RAW TAIL last 40 lines |
 | A13 | Source tagging (smoke_test vs user) | **DONE** | `webhook.py:494` — tags `source` on ci_run insert |
-| A14 | Sanity review → real second opinion or delete | **PENDING** | `processor.py:840` — still uses same-model sanity check. Should route through Kimi (different model) now that primary is DeepSeek, or delete |
+| A14 | Sanity review → real second opinion or delete | **DONE** | `processor.py:892` — routes through `settings.kimi_model` for genuine cross-model second opinion |
 
 ---
 
@@ -74,14 +74,14 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 | B1 | Environment secrets → auto-detect + 1-click UI | **PARTIAL** — schema has `required_secrets`, UI wire-up unknown | P1 |
 | B3 | Multi-model consensus on `unknown` category | **NOT STARTED** — DeepSeek is now primary, Kimi is fallback; consensus logic not wired | P2 |
 | B4 | Speculative PRs for low confidence | **NOT STARTED** — still downgrades to `manual_required` | P2 |
-| C4 | Patch format for file changes | **REVERSED** — prompt now requires `new_content`, `patch` deprecated. Correct decision: patches are fragile | N/A |
+| C4 | Patch format for file changes | **REMOVED** — `patch` field deleted from schema, tool definition, and all call sites. `new_content` is the only path | N/A |
 | D1 | Increase iterations 3→4 | **PARTIAL** — raised from 2→3 in self-verification loop. Consider 4 after data shows it helps | P3 |
 | D2 | Parallel model calls (speed) | **NOT STARTED** — current: sequential primary→fallback | P3 |
 | E1 | Slack/Discord alerts | **NOT STARTED** — no `_notify` function | P2 |
 | E4 | Guard against Cloud Run scale-down | **DONE** via reconciler sweeps | Done |
 | F | GitHub App full migration | **PARTIAL** — App exists, `get_installation_token` works, but not the primary auth path | P1 |
 | G1 | Pre-emptive fix on push webhook | **NOT STARTED** | P3 (future) |
-| G2 | PR review agent (cross-model sanity check) | **SAME AS A14** — needs fix | P2 |
+| G2 | PR review agent (cross-model sanity check) | **DONE** — A14 fixed, routes through Kimi | Done |
 | G3 | Slack/Discord bot integration | **NOT STARTED** | P3 |
 
 ---
@@ -178,20 +178,18 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 
 ---
 
-### Session N+3: Immediate Bug Fixes + Debt
+### ~~Session N+3: Immediate Bug Fixes + Debt~~ — DONE (2026-06-15)
 
-**Bugs to fix:**
+**All 6 bugs resolved.** Deployed as `drufiy-backend-00130-dvs`.
 
-| Bug | File | Severity |
-|-----|------|----------|
-| A9: Kimi client timeout still 240s (should be 90s) | `kimi_client.py:19` | Medium |
-| A9: No wall-clock cap on `diagnose_failure` | `diagnosis_agent.py` | Medium — add `asyncio.wait_for(..., timeout=120)` |
-| A14: Sanity check uses same model (now DeepSeek checks DeepSeek) | `processor.py:840` | Medium — route through Kimi for genuine second opinion, or delete |
-| Invalid webhook signature from 169.254.169.126 in logs | `webhook.py` | Low — confirm it's a health-check probe, not a dropped webhook |
-| Re-run dedup: GitHub re-runs reuse same `run_id` → deduped | `webhook.py` | Low — intended behavior, but confirm new failures on same SHA aren't swallowed |
-| `patch` field still in schema (deprecated) | `schemas.py` | Low — consider removing entirely so model can't regress |
-
-**Estimated effort:** 0.5 day
+| Bug | Fix | Status |
+|-----|-----|--------|
+| A9: Kimi client timeout still 240s | Reduced to 90s in `kimi_client.py:19` | **DONE** |
+| A9: No wall-clock cap on `diagnose_failure` | 120s `asyncio.wait_for` on both call sites in `processor.py` | **DONE** |
+| A14: Sanity check uses same model | Routes through `settings.kimi_model` for cross-model review | **DONE** |
+| Health-check probe noise (169.254.*) | Downgraded to `logger.debug` in `webhook.py` | **DONE** |
+| Re-run dedup swallowing new failures | Confirmed correct: dedup is by `(repo, sha, run_id)` — different workflows get different IDs | **OK** |
+| `patch` field still in schema | Removed from `schemas.py`, tool definition, `_materialize_patch_file_changes`, and all fallback paths | **DONE** |
 
 ---
 
@@ -262,7 +260,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00124-np2` (asia-south1)
+**Cloud Run:** `drufiy-backend-00130-dvs` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
@@ -290,7 +288,7 @@ process_failure:
     9. Category normalization via _CATEGORY_ALIASES
     10. Store diagnosis in Supabase (diagnoses table)
     11. If safe_auto_apply:
-        → _sanity_check_fix (cross-model review — needs fix, see A14)
+        → _sanity_check_fix (cross-model review via Kimi)
         → assess_diff_risk
         → create_fix_pr (branch + commit files via new_content + open PR with blame)
         → ci_run.status = "fixed"
