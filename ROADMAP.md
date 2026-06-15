@@ -260,7 +260,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00130-dvs` (asia-south1)
+**Cloud Run:** `drufiy-backend-00133-z4t` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
