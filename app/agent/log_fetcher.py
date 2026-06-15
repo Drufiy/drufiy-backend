@@ -27,6 +27,24 @@ class LogsParseError(LogFetchError):
     pass
 
 
+import re
+
+_MATRIX_JOB_RE = re.compile(r"^([^/]+)/")
+
+
+def _extract_matrix_summary(filenames: list[str]) -> str:
+    jobs: dict[str, int] = {}
+    for fname in filenames:
+        m = _MATRIX_JOB_RE.match(fname)
+        if m:
+            job_name = m.group(1).strip()
+            jobs[job_name] = jobs.get(job_name, 0) + 1
+    if len(jobs) <= 1:
+        return ""
+    lines = [f"- {name} ({count} steps)" for name, count in sorted(jobs.items())]
+    return f"Multiple matrix jobs detected:\n" + "\n".join(lines)
+
+
 async def fetch_workflow_logs(github_run_id: int, repo_full_name: str, access_token: str) -> str:
     url = f"https://api.github.com/repos/{repo_full_name}/actions/runs/{github_run_id}/logs"
     headers = {
@@ -84,5 +102,9 @@ def _parse_zip_logs(zip_bytes: bytes) -> str:
 
     if len(concatenated) > MAX_LOG_CHARS:
         concatenated = "... [earlier logs truncated] ...\n" + concatenated[-MAX_LOG_CHARS:]
+
+    matrix_summary = _extract_matrix_summary(zf.namelist())
+    if matrix_summary:
+        concatenated = f"=== MATRIX JOBS ===\n{matrix_summary}\n\n{concatenated}"
 
     return concatenated

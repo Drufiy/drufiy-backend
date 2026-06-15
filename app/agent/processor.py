@@ -15,6 +15,7 @@ from app.agent.log_fetcher import (
     LogsNotAvailableError,
     fetch_workflow_logs,
 )
+from app.agent.flaky_tracker import get_flaky_summary, is_known_flaky, record_flaky, record_flaky_failure_only
 from app.agent.pr_creator import PRCreationError, create_fix_pr, push_fix_to_branch
 from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
@@ -142,6 +143,7 @@ async def process_failure(ci_run_id: str):
 
         # ── 6.5. Flaky tests: rerun once, then auto-skip if still failing ────
         if diagnosis.is_flaky_test:
+            test_target = _infer_test_target(diagnosis.problem_summary, logs)
             logger.info(f"Flaky test detected for run {ci_run_id} — attempting automatic rerun")
             rerun_requested = await _trigger_rerun(github_run_id, repo_full_name, access_token)
             rerun_conclusion = None
@@ -153,9 +155,13 @@ async def process_failure(ci_run_id: str):
                 )
                 if rerun_conclusion == "success":
                     _mark_rerun_resolved(ci_run_id, diagnosis_row.get("id"))
+                    if test_target.get("test_file"):
+                        record_flaky(repo["id"], test_target["test_file"], test_target.get("test_name"))
                     logger.info(f"Flaky rerun passed for run {ci_run_id}")
                     return
 
+            if test_target.get("test_file"):
+                record_flaky_failure_only(repo["id"], test_target["test_file"], test_target.get("test_name"))
             logger.info(
                 f"Flaky rerun did not resolve run {ci_run_id} "
                 f"(requested={rerun_requested}, conclusion={rerun_conclusion}) — creating skip PR"
@@ -358,6 +364,7 @@ _SOURCE_EXTENSIONS = {
     ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
     ".java", ".rb", ".php", ".cs", ".cpp", ".c", ".h",
     ".json", ".toml", ".yaml", ".yml",
+    ".dockerfile",
 }
 
 # Patterns to extract file paths from CI logs
@@ -367,17 +374,19 @@ _FILE_PATH_RE = re.compile(
         File\s+"?([^"'\s,]+\.[a-zA-Z]+)"?    |   # Python: File "path.py"
         (?:ERROR|error)\s+(?:in\s+)?([^\s:]+\.[a-zA-Z]+)  |   # Generic: error in path.ext
         \s+at\s+[^(]+\(([^)]+\.[a-zA-Z]+):\d+\)  |  # JS stack frame: at fn (file.ts:10)
+        ((?:Dockerfile|docker-compose\.ya?ml)(?:\.[a-zA-Z]+)?)\b  |  # Docker files
         ([a-zA-Z0-9_./\-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb))\b  # bare path with known extension
     )
     """,
     re.VERBOSE,
 )
 
-# Common dependency manifests — always fetch these if they exist
+# Common dependency manifests and deploy configs — always fetch these if they exist
 _MANIFEST_FILES = [
     "package.json", "requirements.txt", "pyproject.toml",
     "Cargo.toml", "go.mod", "pom.xml", "Gemfile",
     "tsconfig.json", "jest.config.js", "jest.config.ts",
+    "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
 ]
 _PYTHON_IMPORT_RE = re.compile(r"^(?:from|import)\s+([\w.]+)", re.MULTILINE)
 

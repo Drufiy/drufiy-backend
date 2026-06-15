@@ -364,6 +364,18 @@ async def admin_outcomes(current_user: dict = Depends(get_current_user)):
     }
 
 
+@router.get("/admin/flaky-tests")
+async def admin_flaky_tests(current_user: dict = Depends(get_current_user)):
+    from app.agent.flaky_tracker import get_flaky_summary
+    repos = supabase.table("connected_repos").select("id, repo_full_name").eq("user_id", current_user["id"]).execute()
+    result = {}
+    for repo in repos.data or []:
+        summary = get_flaky_summary(repo["id"])
+        if summary:
+            result[repo["repo_full_name"]] = summary
+    return {"flaky_tests": result}
+
+
 # ── GET /runs/{run_id} ────────────────────────────────────────────────────────
 
 @router.get("/{run_id}")

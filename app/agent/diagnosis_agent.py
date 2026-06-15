@@ -397,6 +397,76 @@ Workflow uses setup-node with cache: npm but there is no package-lock.json.
   ← One-line fix. Never escalate this to manual_required.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPENDENCY CONFLICT RESOLUTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When you see dependency version conflicts:
+  npm: "ERESOLVE unable to resolve dependency tree", "Could not resolve dependency"
+  pip: "ResolutionImpossible", "ERROR: Cannot install X and Y because..."
+  yarn: "has unmet peer dependency"
+
+FIX STRATEGY:
+1. Read the conflict message carefully — it tells you exactly which packages clash.
+2. For npm ERESOLVE: update the conflicting version range in package.json, \
+   or add an "overrides" field. Prefer bumping to a compatible version.
+3. For pip: adjust version pins in requirements.txt/pyproject.toml to find a compatible set. \
+   If pkg A needs X>=2.0 and pkg B needs X<2.0, check if either has a newer release.
+4. For peer dependency warnings: add the peer dep explicitly to package.json.
+5. ALWAYS provide the complete manifest file in new_content — not just the changed line.
+6. These are safe_auto_apply with high confidence when the conflict message is clear.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DEPLOY / DOCKER FAILURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When the failure is in a Docker build or deploy step (not test/lint):
+  "COPY failed", "RUN pip install ... error", "docker build ... failed"
+  "Error: Process completed with exit code 1" in a deploy step
+
+FIX STRATEGY:
+1. Read the Dockerfile or docker-compose.yml from the context files.
+2. Common fixes: wrong COPY path, missing dependency in RUN install, wrong base image tag.
+3. For deploy config failures: check the workflow YAML's deploy step for bad env references.
+4. These are often safe_auto_apply — Docker/deploy config is as mechanical as workflow YAML.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MATRIX BUILD FAILURES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When CI uses a strategy matrix (multiple OS/version combos):
+  The logs may contain headers like "=== Test (node 18) ===" or "=== build (ubuntu, 3.11) ===".
+  The metadata section below may include a "matrix_failures" field listing which combos failed.
+
+FIX STRATEGY:
+1. Identify WHICH matrix entry failed — don't assume all of them did.
+2. If only one combo failed: the fix is likely version-specific (deprecated API, platform difference).
+3. If all combos failed: the fix is likely a code/dependency issue unrelated to the matrix.
+4. Fix the code to work across the matrix, OR update the matrix config if the version is unsupported.
+
+EXAMPLE 13 — npm ERESOLVE dependency conflict (safe_auto_apply)
+Log: "npm ERR! ERESOLVE unable to resolve dependency tree"
+     "npm ERR! peer react@'^17.0.0' from react-dom@17.0.2"
+     "npm ERR! Could not resolve dependency: react@18.2.0"
+  fix_type: "safe_auto_apply", confidence: 0.90, category: "dependency"
+  files_changed: [{path: "package.json", new_content: "<complete package.json with react-dom bumped to ^18.2.0>"}]
+
+EXAMPLE 14 — pip version conflict (safe_auto_apply)
+Log: "ERROR: Cannot install django==4.2 and djangorestframework==3.12 because..."
+     "djangorestframework 3.12 requires django<4.0"
+  fix_type: "safe_auto_apply", confidence: 0.92, category: "dependency"
+  files_changed: [{path: "requirements.txt", new_content: "<complete file with djangorestframework>=3.14>"}]
+
+EXAMPLE 15 — Docker COPY failure (safe_auto_apply)
+Log: "COPY failed: file not found in build context: ./dist/app.js"
+  fix_type: "safe_auto_apply", confidence: 0.90, category: "workflow_config"
+  files_changed: [{path: "Dockerfile", new_content: "<complete Dockerfile with corrected COPY path or added build step>"}]
+
+EXAMPLE 16 — Matrix: one version fails (safe_auto_apply)
+Log: Node 20 passes, Node 22 fails with "ERR_IMPORT_ASSERTION_TYPE_MISSING"
+  fix_type: "safe_auto_apply", confidence: 0.88, category: "code"
+  files_changed: [{path: "src/loader.ts", new_content: "<complete file using import attributes syntax>"}]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOW TO READ CI LOGS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -480,7 +550,10 @@ _ERROR_RE = re.compile(
     r"|✗|✕|FAILED|ERROR|WARN"
     r"|unable to find|unresolved|missing|undefined|undeclared"
     r"|permission denied|access denied|401|403|404 not found"
-    r"|invalid|unexpected token|parse error|compilation failed)",
+    r"|invalid|unexpected token|parse error|compilation failed"
+    r"|resolutionimpossible|conflicting\s+dependencies|peer\s+dep|version\s+conflict"
+    r"|COPY failed|docker.*build.*failed|manifest.*not found"
+    r"|deploy.*failed|rollout.*failed|image.*push.*failed)",
     re.IGNORECASE,
 )
 
