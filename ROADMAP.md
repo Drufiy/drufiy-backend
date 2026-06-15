@@ -206,6 +206,14 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 
 ---
 
+### Pre-Existing Failure Detection — DONE (2026-06-15)
+
+**Problem:** When Prash's fix removes the original blocker, a latent unrelated error in the repo surfaces on the fix branch. Prash blamed itself and burned all retries trying to fix something it didn't break.
+
+**Fix:** `preexisting_detector.py` — compares error-implicated files against Prash's changed files. If zero overlap, the failure is pre-existing. Webhook sets status to `blocked_preexisting` instead of retrying. Deployed as `drufiy-backend-00140-4tg`.
+
+---
+
 ### Session N+5: Production Awareness (Read-Only First)
 
 **Why:** "Current coding tools don't know what's happening in production" — this is the moat. But touching production is high-blast-radius. Start read-only.
@@ -261,7 +269,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00137-f92` (asia-south1)
+**Cloud Run:** `drufiy-backend-00140-4tg` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
