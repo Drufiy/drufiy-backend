@@ -310,6 +310,105 @@ def _update_known_good_files(ci_run: dict, repo_id: str):
         logger.warning(f"Failed to update known_good_files: {e}")
 
 
+async def handle_pr_outcome(payload: dict):
+    """
+    Handle pull_request closed events — record merge/close outcomes for Drufiy PRs.
+    Updates the diagnoses table with outcome data for the data flywheel.
+    """
+    pr = payload.get("pull_request", {})
+    pr_number = pr.get("number")
+    repo_full_name = payload.get("repository", {}).get("full_name", "")
+    head_branch = pr.get("head", {}).get("ref", "")
+
+    if not any(head_branch.startswith(p) for p in FIX_BRANCH_PREFIXES):
+        return
+
+    diag_result = (
+        supabase.table("diagnoses")
+        .select("id, created_at, run_id")
+        .eq("github_pr_number", pr_number)
+        .order("iteration", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not diag_result.data:
+        # Also try matching by run_id extracted from the branch name
+        # Branch format: prash/fix-run-{run_id_prefix}-{timestamp}
+        for prefix in FIX_BRANCH_PREFIXES:
+            if head_branch.startswith(prefix):
+                run_id_prefix = head_branch[len(prefix):].split("-")[0]
+                diag_result = (
+                    supabase.table("diagnoses")
+                    .select("id, created_at, run_id")
+                    .like("run_id", f"{run_id_prefix}%")
+                    .order("iteration", desc=True)
+                    .limit(1)
+                    .execute()
+                )
+                break
+    if not diag_result.data:
+        logger.info(f"PR outcome: no diagnosis found for PR #{pr_number} branch={head_branch}")
+        return
+
+    diag = diag_result.data[0]
+    merged = pr.get("merged", False)
+    merged_at = pr.get("merged_at")
+    created_at = pr.get("created_at")
+
+    updates: dict = {}
+
+    if merged and merged_at:
+        updates["pr_merged_at"] = merged_at
+        if created_at:
+            try:
+                t_merge = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+                t_create = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                updates["time_to_merge_ms"] = int((t_merge - t_create).total_seconds() * 1000)
+            except Exception:
+                pass
+
+        # Check if human edited the PR before merging
+        try:
+            access_token = await get_repo_access_token(
+                supabase.table("connected_repos")
+                .select("*")
+                .eq("repo_full_name", repo_full_name)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+                .data[0]
+            )
+            if access_token:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    commits_resp = await client.get(
+                        f"https://api.github.com/repos/{repo_full_name}/pulls/{pr_number}/commits",
+                        headers={
+                            "Authorization": f"Bearer {access_token}",
+                            "Accept": "application/vnd.github+json",
+                        },
+                    )
+                    if commits_resp.status_code == 200:
+                        commits = commits_resp.json()
+                        non_drufiy = [
+                            c for c in commits
+                            if not (c.get("commit", {}).get("message", "").startswith("fix:") and
+                                    "drufiy auto-fix" in c.get("commit", {}).get("message", ""))
+                        ]
+                        if non_drufiy:
+                            updates["human_edited_before_merge"] = True
+        except Exception as e:
+            logger.warning(f"PR outcome: failed to check human edits for PR #{pr_number}: {e}")
+    else:
+        updates["pr_closed_without_merge"] = True
+
+    if updates:
+        supabase.table("diagnoses").update(updates).eq("id", diag["id"]).execute()
+        logger.info(
+            f"PR outcome recorded: PR #{pr_number} {'merged' if merged else 'closed'} "
+            f"repo={repo_full_name} diag={diag['id'][:8]} updates={list(updates.keys())}"
+        )
+
+
 async def _auto_merge_pr(
     repo_full_name: str,
     pr_number: int,
@@ -407,6 +506,11 @@ async def github_webhook(
             from app.agent.push_handler import handle_push_event
             background_tasks.add_task(handle_push_event, payload)
             return {"status": "push_preflight_queued"}
+        if x_github_event == "pull_request":
+            action = payload.get("action")
+            if action == "closed":
+                background_tasks.add_task(handle_pr_outcome, payload)
+                return {"status": "pr_outcome_queued"}
         return {"status": "ignored", "event": x_github_event}
 
     action = payload.get("action")

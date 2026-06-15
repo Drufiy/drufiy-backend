@@ -142,14 +142,41 @@ async def dashboard_stats(current_user: dict = Depends(get_current_user)):
         r = supabase.table("ci_runs").select("id", count="exact").in_("repo_id", ids).eq("status", "verified").execute()
         return r.count or 0
 
-    repos, diagnosed, prs, verified = await asyncio.gather(
-        _repos_count(), _diagnosed_count(), _prs_count(), _verified_count()
+    async def _merge_stats():
+        repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
+        if not repos:
+            return {"merged": 0, "rejected": 0, "merge_rate": 0}
+        ids = [r["id"] for r in repos]
+        runs = supabase.table("ci_runs").select("id").in_("repo_id", ids).execute().data
+        if not runs:
+            return {"merged": 0, "rejected": 0, "merge_rate": 0}
+        run_ids = [r["id"] for r in runs]
+        diags = (
+            supabase.table("diagnoses")
+            .select("pr_merged_at, pr_closed_without_merge")
+            .in_("run_id", run_ids)
+            .not_.is_("github_pr_number", "null")
+            .execute()
+            .data or []
+        )
+        merged = sum(1 for d in diags if d.get("pr_merged_at"))
+        rejected = sum(1 for d in diags if d.get("pr_closed_without_merge"))
+        total = len(diags)
+        return {
+            "merged": merged,
+            "rejected": rejected,
+            "merge_rate": round(merged / max(total, 1), 2),
+        }
+
+    repos, diagnosed, prs, verified, merges = await asyncio.gather(
+        _repos_count(), _diagnosed_count(), _prs_count(), _verified_count(), _merge_stats()
     )
     return {
         "repos_connected": repos,
         "failures_diagnosed": diagnosed,
         "prs_created": prs,
         "verified_fixes": verified,
+        "merge_stats": merges,
     }
 
 
@@ -255,6 +282,86 @@ async def admin_stats(current_user: dict = Depends(get_current_user)):
         "avg_fix_minutes": avg_fix_minutes,
         "by_status": status_counts,
         "by_category": category_stats,
+    }
+
+
+@router.get("/admin/outcomes")
+async def admin_outcomes(current_user: dict = Depends(get_current_user)):
+    """
+    Real outcome metrics from the data flywheel — merge rates, human edits,
+    reverts, and time-to-merge across all Drufiy PRs for this user.
+    """
+    user_id = current_user["id"]
+
+    repos = supabase.table("connected_repos").select("id").eq("user_id", user_id).execute().data
+    if not repos:
+        return {"message": "No repos connected"}
+
+    repo_ids = [r["id"] for r in repos]
+
+    run_ids_result = (
+        supabase.table("ci_runs")
+        .select("id")
+        .in_("repo_id", repo_ids)
+        .execute()
+    )
+    run_ids = [r["id"] for r in (run_ids_result.data or [])]
+    if not run_ids:
+        return {"message": "No runs yet"}
+
+    diags = (
+        supabase.table("diagnoses")
+        .select("id, run_id, github_pr_number, pr_merged_at, pr_closed_without_merge, human_edited_before_merge, reverted_within_7d, time_to_merge_ms, category, confidence, fix_type")
+        .in_("run_id", run_ids)
+        .not_.is_("github_pr_number", "null")
+        .execute()
+        .data or []
+    )
+
+    total_prs = len(diags)
+    if total_prs == 0:
+        return {"message": "No PRs created yet", "total_prs": 0}
+
+    merged = [d for d in diags if d.get("pr_merged_at")]
+    closed_no_merge = [d for d in diags if d.get("pr_closed_without_merge")]
+    human_edited = [d for d in diags if d.get("human_edited_before_merge")]
+    reverted = [d for d in diags if d.get("reverted_within_7d")]
+    pending = [d for d in diags if not d.get("pr_merged_at") and not d.get("pr_closed_without_merge")]
+
+    merge_times = [d["time_to_merge_ms"] for d in merged if d.get("time_to_merge_ms")]
+    avg_merge_ms = round(sum(merge_times) / len(merge_times)) if merge_times else None
+
+    by_category: dict[str, dict] = {}
+    for d in diags:
+        cat = d.get("category", "unknown")
+        if cat not in by_category:
+            by_category[cat] = {"prs": 0, "merged": 0, "rejected": 0, "human_edited": 0}
+        by_category[cat]["prs"] += 1
+        if d.get("pr_merged_at"):
+            by_category[cat]["merged"] += 1
+        if d.get("pr_closed_without_merge"):
+            by_category[cat]["rejected"] += 1
+        if d.get("human_edited_before_merge"):
+            by_category[cat]["human_edited"] += 1
+
+    for cat in by_category:
+        s = by_category[cat]
+        s["merge_rate"] = round(s["merged"] / max(s["prs"], 1), 2)
+
+    return {
+        "total_prs": total_prs,
+        "merged": len(merged),
+        "rejected": len(closed_no_merge),
+        "pending": len(pending),
+        "human_edited_before_merge": len(human_edited),
+        "reverted_within_7d": len(reverted),
+        "merge_rate": round(len(merged) / max(total_prs, 1), 2),
+        "clean_merge_rate": round(
+            (len(merged) - len(human_edited)) / max(total_prs, 1), 2
+        ),
+        "avg_time_to_merge_ms": avg_merge_ms,
+        "avg_time_to_merge_minutes": round(avg_merge_ms / 60000, 1) if avg_merge_ms else None,
+        "by_category": by_category,
     }
 
 

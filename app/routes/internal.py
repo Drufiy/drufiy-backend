@@ -253,3 +253,203 @@ async def trigger_weekly_report(
         "dry_run": dry_run,
         "results": results,
     }
+
+
+@router.post("/backfill-outcomes")
+async def backfill_outcomes(
+    x_internal_secret: str | None = Header(default=None),
+):
+    """
+    One-time backfill: for all diagnoses with a github_pr_number but no pr_merged_at,
+    fetch the PR state from GitHub and record the outcome.
+    """
+    _require_cron_secret(x_internal_secret)
+    from app.github_app import get_repo_access_token
+
+    diags = (
+        supabase.table("diagnoses")
+        .select("id, run_id, github_pr_number")
+        .not_.is_("github_pr_number", "null")
+        .is_("pr_merged_at", "null")
+        .eq("pr_closed_without_merge", False)
+        .execute()
+        .data or []
+    )
+
+    if not diags:
+        return {"status": "ok", "backfilled": 0, "message": "Nothing to backfill"}
+
+    run_ids = list({d["run_id"] for d in diags})
+    ci_runs = (
+        supabase.table("ci_runs")
+        .select("id, repo_id")
+        .in_("id", run_ids)
+        .execute()
+        .data or []
+    )
+    run_to_repo = {r["id"]: r["repo_id"] for r in ci_runs}
+
+    repo_ids = list(set(run_to_repo.values()))
+    repos = (
+        supabase.table("connected_repos")
+        .select("id, repo_full_name")
+        .in_("id", repo_ids)
+        .execute()
+        .data or []
+    )
+    repo_map = {r["id"]: r for r in repos}
+
+    backfilled = 0
+    for diag in diags:
+        repo_id = run_to_repo.get(diag["run_id"])
+        repo_row = repo_map.get(repo_id) if repo_id else None
+        if not repo_row:
+            continue
+
+        try:
+            full_repo = (
+                supabase.table("connected_repos")
+                .select("*")
+                .eq("id", repo_id)
+                .limit(1)
+                .execute()
+                .data[0]
+            )
+            access_token = await get_repo_access_token(full_repo)
+            if not access_token:
+                continue
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{GITHUB_API}/repos/{repo_row['repo_full_name']}/pulls/{diag['github_pr_number']}",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+                if resp.status_code != 200:
+                    continue
+
+                pr = resp.json()
+                updates: dict = {}
+
+                if pr.get("merged") and pr.get("merged_at"):
+                    updates["pr_merged_at"] = pr["merged_at"]
+                    if pr.get("created_at"):
+                        try:
+                            t_merge = datetime.fromisoformat(pr["merged_at"].replace("Z", "+00:00"))
+                            t_create = datetime.fromisoformat(pr["created_at"].replace("Z", "+00:00"))
+                            updates["time_to_merge_ms"] = int((t_merge - t_create).total_seconds() * 1000)
+                        except Exception:
+                            pass
+                elif pr.get("state") == "closed" and not pr.get("merged"):
+                    updates["pr_closed_without_merge"] = True
+
+                if updates:
+                    supabase.table("diagnoses").update(updates).eq("id", diag["id"]).execute()
+                    backfilled += 1
+        except Exception as e:
+            logger.warning(f"Backfill failed for diag {diag['id'][:8]}: {e}")
+
+    return {"status": "ok", "backfilled": backfilled, "total_checked": len(diags)}
+
+
+@router.post("/check-reverts")
+async def check_reverts(
+    x_internal_secret: str | None = Header(default=None),
+):
+    """
+    Scan recently merged Drufiy PRs (last 7 days) for reverts.
+    Sets reverted_within_7d=true on any diagnosis whose PR merge commit was reverted.
+    Call daily via Cloud Scheduler.
+    """
+    _require_cron_secret(x_internal_secret)
+    from app.github_app import get_repo_access_token
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    merged_diags = (
+        supabase.table("diagnoses")
+        .select("id, run_id, github_pr_number, pr_merged_at, reverted_within_7d")
+        .not_.is_("pr_merged_at", "null")
+        .gte("pr_merged_at", cutoff)
+        .eq("reverted_within_7d", False)
+        .execute()
+        .data or []
+    )
+
+    if not merged_diags:
+        return {"status": "ok", "checked": 0, "reverts_found": 0}
+
+    run_ids = list({d["run_id"] for d in merged_diags})
+    ci_runs = (
+        supabase.table("ci_runs")
+        .select("id, repo_id")
+        .in_("id", run_ids)
+        .execute()
+        .data or []
+    )
+    run_to_repo = {r["id"]: r["repo_id"] for r in ci_runs}
+
+    repo_ids = list(set(run_to_repo.values()))
+    repos = (
+        supabase.table("connected_repos")
+        .select("id, repo_full_name")
+        .in_("id", repo_ids)
+        .execute()
+        .data or []
+    )
+    repo_map = {r["id"]: r["repo_full_name"] for r in repos}
+
+    reverts_found = 0
+    for diag in merged_diags:
+        repo_id = run_to_repo.get(diag["run_id"])
+        if not repo_id:
+            continue
+        repo_full_name = repo_map.get(repo_id)
+        if not repo_full_name:
+            continue
+        pr_number = diag["github_pr_number"]
+
+        try:
+            repo_row = next((r for r in repos if r["id"] == repo_id), None)
+            if not repo_row:
+                continue
+            # Check if any commit after the merge mentions "revert" + the PR number
+            access_token = await get_repo_access_token(
+                supabase.table("connected_repos")
+                .select("*")
+                .eq("id", repo_id)
+                .limit(1)
+                .execute()
+                .data[0]
+            )
+            if not access_token:
+                continue
+
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{GITHUB_API}/repos/{repo_full_name}/commits",
+                    params={"since": diag["pr_merged_at"], "per_page": 30},
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+                if resp.status_code != 200:
+                    continue
+
+                for commit in resp.json():
+                    msg = commit.get("commit", {}).get("message", "").lower()
+                    if "revert" in msg and (
+                        f"#{pr_number}" in msg or f"pr #{pr_number}" in msg
+                    ):
+                        supabase.table("diagnoses").update({
+                            "reverted_within_7d": True,
+                        }).eq("id", diag["id"]).execute()
+                        reverts_found += 1
+                        logger.info(f"Revert detected: PR #{pr_number} in {repo_full_name}")
+                        break
+        except Exception as e:
+            logger.warning(f"Revert check failed for PR #{pr_number}: {e}")
+
+    return {"status": "ok", "checked": len(merged_diags), "reverts_found": reverts_found}
