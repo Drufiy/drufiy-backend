@@ -1,6 +1,6 @@
 # Prash — Engineering Roadmap
 
-**Updated: 2026-06-14** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
+**Updated: 2026-06-15** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
 **Founders:** Aradhya Mishra + Maneesh Awasthi
 
 ---
@@ -152,20 +152,27 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 
 ---
 
-### Session N+2: Outcome Tracking + Data Flywheel Foundation
+### ~~Session N+2: Outcome Tracking + Data Flywheel Foundation~~ — DONE (2026-06-15)
 
-**Why:** Every fix generates a signal — CI passed? PR merged? Human edited it first? Reverted within 7 days? This is the foundation for "self-learning" — without it, that claim is aspirational.
+**Shipped and backfilled.** Prash now tracks real outcomes for every PR it creates.
 
-**What to build:**
-1. Extend `agent_calls` or add `fix_outcomes` table:
-   - `ci_passed_on_fix_branch: bool`
-   - `pr_merged: bool`
-   - `human_edited_before_merge: bool`
-   - `reverted_within_7d: bool`
-   - `time_to_merge_ms: int`
-2. Webhook handlers to capture merge/revert events
-3. Dashboard widget showing real success metrics
-4. Recalibrate confidence against actual merge rates (not model vibes)
+**What shipped:**
+1. **5 outcome columns on `diagnoses`**: `pr_merged_at`, `pr_closed_without_merge`, `human_edited_before_merge`, `reverted_within_7d`, `time_to_merge_ms`
+2. **`pull_request` webhook handler** — records merge/close outcomes when PRs are closed
+3. **Human edit detection** — checks if non-Drufiy commits were added before merge
+4. **`GET /runs/admin/outcomes`** — real success metrics by category
+5. **`POST /internal/backfill-outcomes`** — retroactive outcome data for existing PRs
+6. **`POST /internal/check-reverts`** — daily revert scanning (cron-ready)
+7. **Dashboard stats** now include `merge_stats` (merged, rejected, merge_rate)
+
+**Backfill results (77 PRs):**
+- **32% overall merge rate** (25/77 merged)
+- **Code fixes: 45% merge rate** (best category)
+- **Workflow config: 18%**, **Dependency: 13%**
+- **0 human edits before merge** — all merges were clean
+- **Avg time to merge: 1.0 min** (mostly auto-merged)
+
+**Requires:** Enable `pull_request` events on GitHub App settings for live tracking.
 
 **Estimated effort:** 1 day
 
@@ -234,7 +241,7 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 | F — GitHub App full migration | Replace OAuth as primary auth, enable marketplace | IMPROVEMENTS.md |
 | G1 — Pre-emptive fix on push | Detect failures before CI runs via static analysis | IMPROVEMENTS.md |
 | G3 — Slack/Discord bot | Interactive fix buttons in Slack/Discord | IMPROVEMENTS.md |
-| Confidence recalibration | Once outcome data exists, recalibrate against actual merge/revert rates | New |
+| Confidence recalibration | Outcome data now exists — recalibrate against actual merge/revert rates | Ready |
 | RAG upgrade — embeddings | Replace keyword RAG with semantic search over past fixes | New |
 | Learning flywheel — few-shot | Retrieve similar past failures as few-shot context in prompts | New |
 
