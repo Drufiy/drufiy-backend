@@ -432,6 +432,14 @@ async def _fetch_relevant_files(
         workflow_name=workflow_name,
     )
 
+    # Parse --ignore patterns from CI logs to avoid fetching files that CI skips
+    ignored_paths = set()
+    for m in re.finditer(r"--ignore[= ](\S+)", logs):
+        ignored_paths.add(m.group(1).lstrip("./"))
+    if ignored_paths:
+        candidates = [p for p in candidates if p not in ignored_paths]
+        logger.info(f"Filtered {len(ignored_paths)} CI-ignored paths from fetch list: {ignored_paths}")
+
     # Prepend workflows and manifests so they're always included if slots remain
     priority_paths = workflow_files + _MANIFEST_FILES
     paths_to_fetch = priority_paths + [p for p in candidates if p not in priority_paths]

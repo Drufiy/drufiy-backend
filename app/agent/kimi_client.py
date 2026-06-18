@@ -283,6 +283,9 @@ async def _call_kimi(messages: list, tool_schema: dict):
     return args, combined_raw, _merge_usage(reasoning_usage, structured_usage)
 
 
+DEEPSEEK_CALL_TIMEOUT = 70  # seconds — leaves room for Kimi fallback within 120s wall-clock
+
+
 async def _call_deepseek(model: str, messages: list, tool_schema: dict):
     """
     Single-call native pattern for DeepSeek V4: thinking is ON by default, and the
@@ -292,19 +295,29 @@ async def _call_deepseek(model: str, messages: list, tool_schema: dict):
     thinking mode ("Thinking mode does not support this tool_choice"). tool_choice="auto"
     keeps the reasoning in the model's own context as it produces the diagnosis, which
     is strictly better than splitting reasoning from the decision across two calls.
+
+    Wrapped in a 70s asyncio timeout so we can fall back to Kimi within the 120s
+    wall-clock budget. The httpx 90s timeout doesn't cap total stream duration —
+    it's a per-read-gap timeout, so unbounded thinking streams right past it.
     """
     max_attempts = 2
     for attempt in range(max_attempts):
         start = time.time()
         try:
-            response = await _create_chat(deepseek,
-                model=model,
-                messages=messages,
-                tools=[{"type": "function", "function": tool_schema}],
-                tool_choice="auto",
-                max_tokens=8000,
-                temperature=1,
+            response = await asyncio.wait_for(
+                _create_chat(deepseek,
+                    model=model,
+                    messages=messages,
+                    tools=[{"type": "function", "function": tool_schema}],
+                    tool_choice="auto",
+                    max_tokens=8000,
+                    temperature=1,
+                ),
+                timeout=DEEPSEEK_CALL_TIMEOUT,
             )
+        except asyncio.TimeoutError:
+            logger.warning(f"DeepSeek ({model}) exceeded {DEEPSEEK_CALL_TIMEOUT}s hard cap (attempt {attempt+1})")
+            return None, f"DeepSeek call timed out after {DEEPSEEK_CALL_TIMEOUT}s", {"latency_ms": int((time.time() - start) * 1000)}
         except Exception as e:
             if _is_transient_error(e) and attempt < max_attempts - 1:
                 logger.warning(f"DeepSeek ({model}) transient error (attempt {attempt+1}): {str(e)[:200]} — retrying after 5s")
@@ -416,19 +429,26 @@ async def _call_with_tools(messages: list, tools: list[dict], model: str = "auto
     # Kimi: thinking via extra_body.
     extra = {} if use_deepseek else {"extra_body": {"thinking": {"type": "enabled", "budget_tokens": 1500}}}
 
+    per_call_timeout = DEEPSEEK_CALL_TIMEOUT if use_deepseek else 90
     max_attempts = 2
     for attempt in range(max_attempts):
         start = time.time()
         try:
-            response = await _create_chat(client,
-                model=model_id,
-                messages=messages,
-                tools=[{"type": "function", "function": tool} for tool in tools],
-                tool_choice="auto",
-                max_tokens=8000 if use_deepseek else 4000,
-                temperature=1,
-                **extra,
+            response = await asyncio.wait_for(
+                _create_chat(client,
+                    model=model_id,
+                    messages=messages,
+                    tools=[{"type": "function", "function": tool} for tool in tools],
+                    tool_choice="auto",
+                    max_tokens=8000 if use_deepseek else 4000,
+                    temperature=1,
+                    **extra,
+                ),
+                timeout=per_call_timeout,
             )
+        except asyncio.TimeoutError:
+            logger.warning(f"{model_id} investigation call exceeded {per_call_timeout}s hard cap (attempt {attempt+1})")
+            return None, "", {"latency_ms": int((time.time() - start) * 1000)}
         except Exception as e:
             if _is_recoverable_model_error(e) and not _is_transient_error(e):
                 logger.warning(f"{model_id} investigation call recoverable error: {str(e)[:200]}")
@@ -594,9 +614,34 @@ async def call_with_investigation(
         valid=(args is not None),
         error=None if args else "forced final produced no tool call",
     )
-    if args is None:
-        raise DiagnosisValidationError("Investigation loop did not yield a final diagnosis.")
-    return args
+    if args is not None:
+        return args
+
+    # Primary model failed — try cross-provider fallback
+    if use_deepseek and kimi:
+        logger.warning(f"DeepSeek investigation final call failed — falling back to Kimi")
+        args, raw, usage = await _call_kimi_structured(final_messages, diagnosis_tool_schema)
+        _log_agent_call(
+            run_id, f"{call_type}_final_fallback", settings.kimi_model,
+            final_messages, raw, args, usage,
+            valid=(args is not None),
+            error=None if args else "Kimi fallback also produced no tool call",
+        )
+        if args is not None:
+            return args
+    elif not use_deepseek and deepseek:
+        logger.warning(f"Kimi investigation final call failed — falling back to DeepSeek")
+        args, raw, usage = await _call_deepseek(settings.deepseek_model, final_messages, diagnosis_tool_schema)
+        _log_agent_call(
+            run_id, f"{call_type}_final_fallback", settings.deepseek_model,
+            final_messages, raw, args, usage,
+            valid=(args is not None),
+            error=None if args else "DeepSeek fallback also produced no tool call",
+        )
+        if args is not None:
+            return args
+
+    raise DiagnosisValidationError("Investigation loop did not yield a final diagnosis (both models failed).")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
