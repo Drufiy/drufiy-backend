@@ -206,11 +206,43 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 
 ---
 
+### Atomic Commit Fix — DONE (2026-06-15)
+
+**Problem:** Prash pushed one commit per file via GitHub Contents API. Intermediate CI runs on partial commits triggered false iteration 2s (e.g. hypnochic-v2 validators.ts commit passed but main.ts wasn't pushed yet → CI failed → iteration 2 fired unnecessarily).
+
+**Fix:** `pr_creator.py` — replaced per-file Contents API calls with Git Tree API in `_commit_files_atomic`. All file changes are now batched into a single atomic commit. Both `create_fix_pr` and `push_fix_to_branch` updated. Deployed as `drufiy-backend-00144-hlw`.
+
+---
+
+### External Checks Detector — DONE (2026-06-15)
+
+**Problem:** After Prash verifies a fix (GitHub Actions passes), users saw ❌ on the PR from Vercel/Netlify/Cloudflare and didn't understand what happened. Dashboard showed Verified but GitHub showed failures — no explanation.
+
+**Fix:** `external_checks.py` — after verification, queries GitHub check-runs + commit-status APIs. Filters out GitHub Actions (Prash's domain), surfaces any other failing checks. Stores human-readable note on `ci_runs.external_checks_note` (e.g. "CI fix verified — 1 external check failing: Vercel. Not related to this fix."). Returned in all run API responses. Deployed as `drufiy-backend-00142-ws5`.
+
+---
+
 ### Pre-Existing Failure Detection — DONE (2026-06-15)
 
 **Problem:** When Prash's fix removes the original blocker, a latent unrelated error in the repo surfaces on the fix branch. Prash blamed itself and burned all retries trying to fix something it didn't break.
 
 **Fix:** `preexisting_detector.py` — compares error-implicated files against Prash's changed files. If zero overlap, the failure is pre-existing. Webhook sets status to `blocked_preexisting` instead of retrying. Deployed as `drufiy-backend-00140-4tg`.
+
+---
+
+### Multi-Repo Test Run Results (2026-06-15 → 2026-06-18)
+
+Tested Prash against 5 repos with different failure types. Results:
+
+| Repo | Bug type | Result | Notes |
+|------|----------|--------|-------|
+| lagom-humanizer | npm peer dep conflict (react ^18 vs ^19) | **Failed** | Diagnosed correctly at 95%. Fix bumped react-dom + workflow but missed `@types/react` → still conflicting. Incomplete dependency fix. |
+| trimly | Multi-file TypeScript (2 missing types + arg mismatch across 3 files) | **Verified ✅** | Diagnosed all 3 errors at 95%, single atomic commit, CI passed. |
+| hypnochic-v2 | TS type mismatch across matrix build (node 18/20/22) | **Verified ✅** | 1st run failed (DeepSeek API disconnect). 2nd run verified. Atomic commit confirmed working. |
+| IRIS-backend | Not tested | — | Planned |
+| Appi-Claw | Not tested | — | Planned |
+
+**Key finding:** Dependency fixes that require bumping multiple interdependent packages (react + react-dom + @types/react + @types/react-dom) are under-specified in the prompt. Prash fixes the direct dependency but misses transitive type package alignment. Needs few-shot example for full peer dep chain fixes.
 
 ---
 
@@ -248,6 +280,7 @@ Prash fixed it in 3 iterations on a single PR (#10): types.ts (iter 1, CI fail) 
 | G3 — Slack/Discord bot | Interactive fix buttons in Slack/Discord | IMPROVEMENTS.md |
 | Multi-CI provider support | Add adapters for CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines. ~1-1.5 days per provider. Core pipeline is CI-agnostic — each adapter needs: webhook route, log fetcher, connect/setup flow. Keep GitHub Actions as default | New |
 | Confidence recalibration | Outcome data now exists — recalibrate against actual merge/revert rates | Ready |
+| Dependency chain fix completeness | When bumping a dep, also bump all `@types/*` peers and transitive requirements. Add few-shot example: react→react-dom→@types/react→@types/react-dom full chain. Tested gap: lagom-humanizer test. | P2 |
 | RAG upgrade — embeddings | Replace keyword RAG with semantic search over past fixes | New |
 | Learning flywheel — few-shot | Retrieve similar past failures as few-shot context in prompts | New |
 | Multi-provider CI | Support CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines — one adapter per provider (webhook + log fetcher), diagnosis pipeline stays unchanged | New |
@@ -269,7 +302,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00140-4tg` (asia-south1)
+**Cloud Run:** `drufiy-backend-00144-hlw` (asia-south1)
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
