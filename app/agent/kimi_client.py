@@ -548,7 +548,20 @@ async def call_with_investigation(
     for step in range(max_steps):
         message, raw, usage = await _call_with_tools(messages, all_tools, model=model)
 
-        if not message or not message.tool_calls:
+        if message is None:
+            # Primary model timed out or disconnected — go straight to Kimi fallback
+            logger.warning(
+                f"Primary model returned None on investigation step {step + 1} for run {run_id} "
+                f"— skipping remaining steps and falling back to Kimi"
+            )
+            _log_agent_call(
+                run_id, f"{call_type}_step_{step + 1}", model_id,
+                messages, raw or "", None, usage, valid=False,
+                error="primary model timeout/disconnect — Kimi fallback",
+            )
+            break
+
+        if not message.tool_calls:
             _log_agent_call(
                 run_id, f"{call_type}_step_{step + 1}", model_id,
                 messages, raw, None, usage, valid=False,
