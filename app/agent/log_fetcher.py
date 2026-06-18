@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import zipfile
@@ -9,6 +10,8 @@ logger = logging.getLogger(__name__)
 MAX_LOG_CHARS = 80_000
 MAX_LOG_ZIP_BYTES = 50_000_000
 MAX_EXTRACTED_LOG_BYTES = 5_000_000
+LOG_RETRY_ATTEMPTS = 3
+LOG_RETRY_DELAY_SECONDS = 4
 
 
 class LogFetchError(Exception):
@@ -45,6 +48,25 @@ def _extract_matrix_summary(filenames: list[str]) -> str:
     return f"Multiple matrix jobs detected:\n" + "\n".join(lines)
 
 
+def _logs_have_step_output(zip_bytes: bytes) -> bool:
+    """Check whether the ZIP contains actual job step output, not just orchestration."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile:
+        return False
+    txt_files = [n for n in zf.namelist() if n.endswith(".txt")]
+    if len(txt_files) <= 1:
+        return False
+    for fname in txt_files:
+        try:
+            content = zf.read(fname).decode("utf-8", errors="replace")
+            if "FAILED" in content or "error" in content.lower() or "passed" in content.lower():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def fetch_workflow_logs(github_run_id: int, repo_full_name: str, access_token: str) -> str:
     url = f"https://api.github.com/repos/{repo_full_name}/actions/runs/{github_run_id}/logs"
     headers = {
@@ -53,21 +75,35 @@ async def fetch_workflow_logs(github_run_id: int, repo_full_name: str, access_to
         "X-GitHub-Api-Version": "2022-11-28",
     }
 
+    zip_bytes = None
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        response = await client.get(url, headers=headers)
+        for attempt in range(LOG_RETRY_ATTEMPTS):
+            response = await client.get(url, headers=headers)
 
-    if response.status_code == 401:
-        raise InsufficientPermissionsError("Token expired or invalid")
-    if response.status_code == 403:
-        raise InsufficientPermissionsError(f"Token lacks repo access for {repo_full_name}")
-    if response.status_code == 404:
-        raise LogsNotAvailableError(f"Logs for run {github_run_id} are not available (expired or deleted)")
-    if response.status_code == 410:
-        raise LogsNotAvailableError("Logs have been deleted (410 Gone)")
-    if response.status_code != 200:
-        raise LogFetchError(f"Unexpected status {response.status_code}: {response.text[:500]}")
+            if response.status_code == 401:
+                raise InsufficientPermissionsError("Token expired or invalid")
+            if response.status_code == 403:
+                raise InsufficientPermissionsError(f"Token lacks repo access for {repo_full_name}")
+            if response.status_code == 404:
+                raise LogsNotAvailableError(f"Logs for run {github_run_id} are not available (expired or deleted)")
+            if response.status_code == 410:
+                raise LogsNotAvailableError("Logs have been deleted (410 Gone)")
+            if response.status_code != 200:
+                raise LogFetchError(f"Unexpected status {response.status_code}: {response.text[:500]}")
 
-    return _parse_zip_logs(response.content)
+            zip_bytes = response.content
+
+            if _logs_have_step_output(zip_bytes):
+                break
+
+            if attempt < LOG_RETRY_ATTEMPTS - 1:
+                logger.warning(
+                    f"Log ZIP for run {github_run_id} has no step output yet "
+                    f"(attempt {attempt + 1}/{LOG_RETRY_ATTEMPTS}), retrying in {LOG_RETRY_DELAY_SECONDS}s"
+                )
+                await asyncio.sleep(LOG_RETRY_DELAY_SECONDS)
+
+    return _parse_zip_logs(zip_bytes)
 
 
 def _parse_zip_logs(zip_bytes: bytes) -> str:

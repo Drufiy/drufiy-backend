@@ -1,6 +1,6 @@
 # Prash — Engineering Roadmap
 
-**Updated: 2026-06-15** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
+**Updated: 2026-06-18** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
 **Founders:** Aradhya Mishra + Maneesh Awasthi
 
 ---
@@ -239,10 +239,13 @@ Tested Prash against 5 repos with different failure types. Results:
 | lagom-humanizer | npm peer dep conflict (react ^18 vs ^19) | **Failed** | Diagnosed correctly at 95%. Fix bumped react-dom + workflow but missed `@types/react` → still conflicting. Incomplete dependency fix. |
 | trimly | Multi-file TypeScript (2 missing types + arg mismatch across 3 files) | **Verified ✅** | Diagnosed all 3 errors at 95%, single atomic commit, CI passed. |
 | hypnochic-v2 | TS type mismatch across matrix build (node 18/20/22) | **Verified ✅** | 1st run failed (DeepSeek API disconnect). 2nd run verified. Atomic commit confirmed working. |
-| IRIS-backend | Not tested | — | Planned |
+| IRIS-backend | Python state machine bug + CI workflow fix | **Blocked** | Two backend bugs blocked the run: (1) `verification_workflows` column missing from DB → Iteration 2 crash. (2) DeepSeek diagnosis timeout at 120s — CI logs only contain runner metadata, test output is never seen. Fix both bugs before re-testing. |
 | Appi-Claw | Not tested | — | Planned |
 
-**Key finding:** Dependency fixes that require bumping multiple interdependent packages (react + react-dom + @types/react + @types/react-dom) are under-specified in the prompt. Prash fixes the direct dependency but misses transitive type package alignment. Needs few-shot example for full peer dep chain fixes.
+**Key findings from testing:**
+- Dependency fixes that require bumping multiple interdependent packages (react + react-dom + @types/react + @types/react-dom) are under-specified in the prompt. Prash fixes the direct dependency but misses transitive type package alignment. Needs few-shot example for full peer dep chain fixes.
+- **`verification_workflows` column missing from DB** — `webhook.py:269` and `processor.py:347` write `"verification_workflows": []` on ci_run insert/update but the column was never added to the schema. Causes `PGRST204` error mid-iteration. Needs `ALTER TABLE ci_runs ADD COLUMN IF NOT EXISTS verification_workflows JSONB DEFAULT '[]'` + Supabase schema cache reload.
+- **Diagnosis timeout recurring at 120s — ROOT CAUSE CORRECTED.** Earlier hypothesis (runner metadata crowding out test output) is wrong: every truncation path in the code keeps the *tail* (`log_fetcher.py:104` → `[-80_000:]`, `diagnosis_agent.py:648` → `[-40_000:]`), so head metadata is dropped, not kept. The real cause is a **log-availability race**: GitHub's `/actions/runs/{id}/logs` returns only the orchestration/queue log immediately on `workflow_run.completed`; the per-step `.txt` files (which contain the pytest failure) lag in archival by a few seconds. Proof: the bf8d8d7 diagnosis text said "only queue/wait events visible, no step output." When DeepSeek gets logs with no error signal, it burns the investigation loop searching for a failure that isn't in the prompt until the 120s cap trips → "no diagnosis available." **Fix:** in `fetch_workflow_logs` / `_parse_zip_logs`, detect when the ZIP has only setup/orchestration entries (no per-step test output) and poll-retry the log fetch with backoff (e.g. 3 attempts, 3-5s apart) before handing to diagnosis. Secondary guard: if preprocessed logs contain no `_ERROR_RE` hits, short-circuit instead of letting the model spin to the wall-clock cap.
 
 ---
 
@@ -284,6 +287,7 @@ Tested Prash against 5 repos with different failure types. Results:
 | RAG upgrade — embeddings | Replace keyword RAG with semantic search over past fixes | New |
 | Learning flywheel — few-shot | Retrieve similar past failures as few-shot context in prompts | New |
 | Multi-provider CI | Support CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines — one adapter per provider (webhook + log fetcher), diagnosis pipeline stays unchanged | New |
+| CLI client (`prash`) | Thin client over the existing API — `prash init` (repo auth), `prash diagnose` (local diagnosis before push), `prash why <incident>` (pull from production-awareness layer). Build as thin client only, never a second agent runtime. Requires production-awareness backend (N+5) before `prash why` is useful. Modeled after Claude Code's CLI distribution strategy. | New — after N+5 |
 
 ---
 

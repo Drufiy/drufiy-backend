@@ -655,6 +655,13 @@ async def diagnose_failure(
             f"({100 * len(preprocessed) // max(len(logs), 1)}% kept) for run {run_id}"
         )
 
+    if not _ERROR_RE.search(preprocessed):
+        logger.warning(f"Preprocessed logs contain no error signal for run {run_id} — likely incomplete logs")
+        raise DiagnosisValidationError(
+            "CI logs contain no error output (likely fetched before step logs were archived). "
+            "The run will be retried by the reconciler."
+        )
+
     user_prompt = _build_user_prompt(
         preprocessed, repo_full_name, commit_message,
         workflow_name, iteration, previous_diagnosis, current_files, commit_sha, commit_diff,
