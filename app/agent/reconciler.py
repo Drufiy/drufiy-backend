@@ -49,7 +49,10 @@ async def reconcile_stuck_verifications() -> int:
     resolved = 0
     try:
         now = datetime.now(timezone.utc)
-        diagnosing_cutoff = (now - timedelta(minutes=5)).isoformat()
+        # 8 min: must sit ABOVE the max legitimate diagnosis time (fetch overhead +
+        # 285s wall-clock ≈ 5.25 min) so the reconciler only rescues genuinely dead
+        # tasks, never re-queues a diagnosis that is still actively running.
+        diagnosing_cutoff = (now - timedelta(minutes=8)).isoformat()
         applying_cutoff = (now - timedelta(minutes=3)).isoformat()
         fixed_cutoff = (now - timedelta(minutes=3)).isoformat()
 
