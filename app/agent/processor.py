@@ -125,11 +125,11 @@ async def process_failure(ci_run_id: str):
                         "default_branch": source_ref,
                     },
                 ),
-                timeout=120,
+                timeout=240,
             )
         except asyncio.TimeoutError:
-            logger.error(f"Diagnosis timed out (120s wall-clock) for run {ci_run_id}")
-            await _mark_failed(ci_run_id, "diagnosis_failed", "Diagnosis timed out after 120 seconds")
+            logger.error(f"Diagnosis timed out (240s wall-clock) for run {ci_run_id}")
+            await _mark_failed(ci_run_id, "diagnosis_failed", "Diagnosis timed out after 240 seconds")
             return
         except DiagnosisValidationError as e:
             logger.error(f"Diagnosis validation failed for run {ci_run_id}: {e}")
@@ -296,11 +296,11 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                         "default_branch": source_ref,
                     },
                 ),
-                timeout=120,
+                timeout=240,
             )
         except asyncio.TimeoutError:
-            logger.error(f"Iteration {next_iteration} diagnosis timed out (120s) for run {ci_run_id}")
-            await _mark_failed(ci_run_id, "exhausted", f"Iteration {next_iteration} diagnosis timed out after 120 seconds")
+            logger.error(f"Iteration {next_iteration} diagnosis timed out (240s) for run {ci_run_id}")
+            await _mark_failed(ci_run_id, "exhausted", f"Iteration {next_iteration} diagnosis timed out after 240 seconds")
             return
         except DiagnosisValidationError as e:
             logger.error(f"Iteration {next_iteration} diagnosis failed for run {ci_run_id}: {e}")
