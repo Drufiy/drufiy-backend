@@ -549,7 +549,7 @@ async def call_with_investigation(
         message, raw, usage = await _call_with_tools(messages, all_tools, model=model)
 
         if message is None:
-            # Primary model timed out or disconnected — go straight to Kimi fallback
+            # Primary model timed out or disconnected — skip DeepSeek for the final call
             logger.warning(
                 f"Primary model returned None on investigation step {step + 1} for run {run_id} "
                 f"— skipping remaining steps and falling back to Kimi"
@@ -559,6 +559,8 @@ async def call_with_investigation(
                 messages, raw or "", None, usage, valid=False,
                 error="primary model timeout/disconnect — Kimi fallback",
             )
+            use_deepseek = False
+            model_id = settings.kimi_model
             break
 
         if not message.tool_calls:
