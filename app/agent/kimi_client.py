@@ -283,9 +283,9 @@ async def _call_kimi(messages: list, tool_schema: dict):
     return args, combined_raw, _merge_usage(reasoning_usage, structured_usage)
 
 
-DEEPSEEK_DIAGNOSIS_BUDGET = 200  # seconds — total DeepSeek time across all investigation steps
-KIMI_FALLBACK_RESERVE = 40       # seconds — reserved for Kimi if DeepSeek exhausts the budget
-DEEPSEEK_CALL_TIMEOUT = 200      # seconds — default per-call cap (used outside investigation loop)
+DEEPSEEK_DIAGNOSIS_BUDGET = 260  # seconds — total DeepSeek time across all investigation steps (~4.3 min)
+KIMI_FALLBACK_RESERVE = 30       # seconds — reserved for Kimi if DeepSeek exhausts the budget
+DEEPSEEK_CALL_TIMEOUT = 260      # seconds — default per-call cap (used outside investigation loop)
 
 
 async def _call_deepseek(model: str, messages: list, tool_schema: dict, timeout: float | None = None):
