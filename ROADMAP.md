@@ -1,6 +1,6 @@
 # Prash — Engineering Roadmap
 
-**Updated: 2026-06-18** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
+**Updated: 2026-06-21** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
 **Founders:** Aradhya Mishra + Maneesh Awasthi
 
 ---
@@ -34,7 +34,7 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 | A6 | Fallback model (cross-provider) | **DONE** | DeepSeek primary, Kimi fallback. `call_with_tool` falls through on failure |
 | A7 | Category normalization / aliases | **DONE** | `schemas.py:4` — `_CATEGORY_ALIASES` + `_normalize_category` validator |
 | A8 | Workflow scope error + GitHub App permissions | **PARTIAL** | `pr_creator.py:148` — returns `WORKFLOW_SCOPE_REQUIRED` error. Frontend OAuth scope + full App migration still needed |
-| A9 | Latency caps (client timeout, wall-clock budget) | **DONE** | DeepSeek 90s, Kimi 90s. 120s `asyncio.wait_for` wall-clock cap on both `diagnose_failure` call sites |
+| A9 | Latency caps (client timeout, wall-clock budget) | **DONE (revised 2026-06-21)** | Replaced flat per-call caps with a **nested budget**: DeepSeek 240s shared diagnosis budget, 285s wall-clock, 8-min reconciler cutoff. See "Diagnosis Reliability Hardening". Old 70s/120s caps were killing legitimate long DeepSeek thinks |
 | A10 | Reconciler: sweep `pending` + `diagnosing` + `applying` | **DONE** | `reconciler.py:56-61` — sweeps all stuck states |
 | A11 | `diagnosed` black hole → `needs_secret` state | **PARTIAL** | `required_secrets` field exists in schema. UI rendering + auto-add safe env defaults not confirmed |
 | A12 | Log preprocessing tail safety net | **DONE** | `diagnosis_agent.py:522` — appends RAW TAIL last 40 lines |
@@ -239,13 +239,77 @@ Tested Prash against 5 repos with different failure types. Results:
 | lagom-humanizer | npm peer dep conflict (react ^18 vs ^19) | **Failed** | Diagnosed correctly at 95%. Fix bumped react-dom + workflow but missed `@types/react` → still conflicting. Incomplete dependency fix. |
 | trimly | Multi-file TypeScript (2 missing types + arg mismatch across 3 files) | **Verified ✅** | Diagnosed all 3 errors at 95%, single atomic commit, CI passed. |
 | hypnochic-v2 | TS type mismatch across matrix build (node 18/20/22) | **Verified ✅** | 1st run failed (DeepSeek API disconnect). 2nd run verified. Atomic commit confirmed working. |
-| IRIS-backend | Python state machine bug + CI workflow fix | **Blocked** | Two backend bugs blocked the run: (1) `verification_workflows` column missing from DB → Iteration 2 crash. (2) DeepSeek diagnosis timeout at 120s — CI logs only contain runner metadata, test output is never seen. Fix both bugs before re-testing. |
-| Appi-Claw | Not tested | — | Planned |
+| IRIS-backend | Python state machine bug + shell test | **Verified ✅** (after backend fixes + 1 assisted fix) | See "Diagnosis Reliability Hardening" below. Required fixing 3 backend bugs (verification_workflows column, DeepSeek timeout budget, reconciler race) + 1 manual fix where Prash diagnosed the wrong root cause. PR #3 merged, main green. |
+| Appi-Claw | flake8 F821 undefined name | **Verified ✅** | Diagnosed at 97%, single commit, CI passed, auto-merged (PR #6). **Bonus:** also caught a *latent pre-existing* bug — `json` undefined at module scope in `shine.py` — that was not planted. |
 
 **Key findings from testing:**
 - Dependency fixes that require bumping multiple interdependent packages (react + react-dom + @types/react + @types/react-dom) are under-specified in the prompt. Prash fixes the direct dependency but misses transitive type package alignment. Needs few-shot example for full peer dep chain fixes.
 - **`verification_workflows` column missing from DB** — `webhook.py:269` and `processor.py:347` write `"verification_workflows": []` on ci_run insert/update but the column was never added to the schema. Causes `PGRST204` error mid-iteration. Needs `ALTER TABLE ci_runs ADD COLUMN IF NOT EXISTS verification_workflows JSONB DEFAULT '[]'` + Supabase schema cache reload.
 - **Diagnosis timeout recurring at 120s — ROOT CAUSE CORRECTED.** Earlier hypothesis (runner metadata crowding out test output) is wrong: every truncation path in the code keeps the *tail* (`log_fetcher.py:104` → `[-80_000:]`, `diagnosis_agent.py:648` → `[-40_000:]`), so head metadata is dropped, not kept. The real cause is a **log-availability race**: GitHub's `/actions/runs/{id}/logs` returns only the orchestration/queue log immediately on `workflow_run.completed`; the per-step `.txt` files (which contain the pytest failure) lag in archival by a few seconds. Proof: the bf8d8d7 diagnosis text said "only queue/wait events visible, no step output." When DeepSeek gets logs with no error signal, it burns the investigation loop searching for a failure that isn't in the prompt until the 120s cap trips → "no diagnosis available." **Fix:** in `fetch_workflow_logs` / `_parse_zip_logs`, detect when the ZIP has only setup/orchestration entries (no per-step test output) and poll-retry the log fetch with backoff (e.g. 3 attempts, 3-5s apart) before handing to diagnosis. Secondary guard: if preprocessed logs contain no `_ERROR_RE` hits, short-circuit instead of letting the model spin to the wall-clock cap.
+
+---
+
+### Diagnosis Reliability Hardening — Test Campaign Close-out (2026-06-20/21)
+
+Completed the 5-repo test campaign. Final tally: **4/5 verified** (trimly, hypnochic-v2, IRIS-backend, Appi-Claw), **1 failed** (lagom-humanizer — incomplete dependency chain). Of the 4 verified, **3 were fully autonomous** (trimly, hypnochic-v2, Appi-Claw); IRIS required backend fixes + 1 assisted code fix.
+
+**Deployed:** `drufiy-backend-00155-kbc` (commit `a923282`).
+
+#### The DeepSeek diagnosis-timeout saga (root cause + permanent fix)
+
+IRIS-backend failed diagnosis 4 times with "Diagnosis timed out after 120 seconds." The earlier hypotheses (runner metadata, log-availability race) were **defense-in-depth but not the cause**. The real cause:
+
+1. **DeepSeek V4 Pro thinking is unbounded** (no token budget, unlike Kimi's 1500). On IRIS's large prompt it thinks 80–104s. Production data confirms **2 calls exceeded 70s, max 103.6s** — these were being killed mid-think by the old 70s per-call cap, which treated "slow but working" as "broken."
+2. **The timeout budget never nested.** Old design: 70s per-call cap, 4 investigation steps, 120s wall-clock. Even 2 steps (70+70) blew the 120s. And the forced-final call re-invoked DeepSeek after a timeout instead of falling to Kimi.
+
+**Fix — a single nested budget (verified to hold):**
+- **DeepSeek diagnosis budget: 240s total**, shared across all investigation steps (not per-call). Each call gets `remaining` time. `kimi_client.py: DEEPSEEK_DIAGNOSIS_BUDGET`.
+- **Outer wall-clock: 285s** (`processor.py`, both call sites).
+- **Reconciler `diagnosing` cutoff raised 5min → 8min** so it only rescues genuinely-dead tasks, never re-queues a live diagnosis (`reconciler.py`).
+- **`max_steps` 4 → 2** (DeepSeek rarely needs more).
+- **On genuine DeepSeek failure, route the final call to Kimi** (don't re-call DeepSeek).
+- Nesting: `~25s fetch + (2s preprocess + 240s DeepSeek + ~43s Kimi reserve) = ~310s << 480s reconciler`. ✅
+
+**Two bugs caught during senior review (before re-testing):**
+- *Fictional Kimi reserve:* DeepSeek 260s + Kimi 30s > 280s outer → Kimi was killed mid-call. Re-budgeted so layers actually nest.
+- *Reconciler race:* `diagnosing` status is set before the GitHub fetches, so the 5-min clock included fetch time; worst case ~305s > 300s → reconciler re-queued live runs (duplicate parallel `process_failure`). Fixed by the 8-min cutoff.
+
+**Also found (separate fix):** `verification_workflows` column was missing from the `ci_runs` schema → `PGRST204` mid-iteration. Added via migration + schema reload.
+
+**Infra note:** Cloud Run **CPU throttling is ON** (default). FastAPI background tasks get near-zero CPU after the webhook responds, slowing DeepSeek's streaming. The 240s budget absorbs this. Switching to "CPU always allocated" would speed diagnosis but is a billing change — deferred.
+
+#### KEY QA FINDING — Prash diagnosed the WRONG root cause when the real exception was masked
+
+IRIS's `run_shell("echo hello")` test failed. Prash diagnosed it as a subprocess-API problem (`create_subprocess_exec` → `create_subprocess_shell`) at 85% confidence. **It was wrong.** The actual bug: on the success path, `run_shell` called `logger.debug(...)`, but the test stubs `loguru` with an incomplete fake (no `.debug`) that wins in `sys.modules` via test ordering. The `AttributeError` was swallowed by a broad `except Exception` that returned `{"status": "error"}`. The CI log only showed the downstream assertion (`status != "ok"`), never the real exception.
+
+**Why Prash missed it:** the true exception was invisible — masked by `except Exception` + a stubbed logger. Prash pattern-matched the surface symptom ("returns error") to the most common cause (subprocess). Its self-verification loop retried twice but kept re-applying variations of the *same wrong hypothesis*, then gave up ("manual intervention required"). The fix was found only after manually adding a `print(e)` to stderr to surface the swallowed exception.
+
+This is a **class of bug Prash systematically struggles with** and is the most important improvement target — see "Lessons → Improvements" below.
+
+#### Lessons learned → Improvement backlog
+
+| # | Lesson | Proposed improvement | Priority |
+|---|--------|---------------------|----------|
+| L1 | **Masked exceptions defeat diagnosis.** When code swallows the real error (`except Exception: return {"status":"error"}`) and CI only shows a downstream assertion, Prash diagnoses the surface symptom and gets it wrong. | When the failing assertion is on a returned status/dict (not a raw traceback), Prash's investigation loop should **fetch the failing function's source and reason about its exception paths** — what could throw on the success path. Add a few-shot example of a swallowed-exception bug. Consider a heuristic: "no traceback in logs + assertion on a dict field → investigate the producer function." | **P0** |
+| L2 | **Repeated-identical-failure = wrong hypothesis.** Self-verification retried twice with the same root cause and failed identically both times. | On iteration N, if the error signature is **identical** to iteration N-1, force a **strategy change**: escalate investigation depth, fetch more files, or explicitly instruct the model "your previous hypothesis was wrong, consider a different cause." Don't re-apply variations. | **P0** |
+| L3 | **Confidence is miscalibrated upward.** 85% on the wrong IRIS fix; 95% on the failed lagom fix. | Recalibrate confidence against the outcome data (merge/revert rates) now that it exists. High confidence on fixes that fail CI should be impossible after calibration. | **P1** |
+| L4 | **Timeout budgets must nest as a system.** Three independent timeout layers (per-call, wall-clock, reconciler) silently fought each other. | Document the budget invariant in code (done in `kimi_client.py` comments). Add a startup assertion that `fetch + wall_clock < reconciler_cutoff`. | **P2** |
+| L5 | **DeepSeek needs room, not a leash.** The model is better than Kimi but thinks longer; capping it short threw away its advantage and fell back to the weaker/pricier model. | Keep the generous shared budget. If prompts grow, raise the reconciler cutoff rather than shrinking DeepSeek's budget. | Done |
+| L6 | **Dependency-chain fixes still incomplete** (lagom-humanizer). | Few-shot example for full peer-dep chains (react → react-dom → @types/react → @types/react-dom). | P2 (carried) |
+| L7 | **Prash reads broadly — good.** Appi-Claw: it caught a latent `json`-scope bug nobody planted. | Keep; this is the data-flywheel payoff. Surface "bonus findings" explicitly in the PR body. | Nice-to-have |
+
+#### Measured performance (production `agent_calls`, last 200 calls)
+
+| Metric | DeepSeek V4 Pro | Kimi K2.6 (fallback) |
+|--------|-----------------|----------------------|
+| Calls sampled | 77 | 89 |
+| Valid structured output | **98%** | 100% |
+| Latency median | **17.3s** | 10.7s |
+| Latency max | **103.6s** | 48.8s |
+| Calls > 70s (old cap would kill) | **2** | 0 |
+| Cost / call (est.) | ~$0.0095 | ~$0.003 (partial) |
+
+**Repo-level success this campaign:** 4/5 verified (80%); **fully autonomous: 3/5 (60%)** — matches the 60% end-to-end target, but IRIS needed assistance and lagom failed, so there is real headroom (L1–L3).
 
 ---
 
@@ -306,7 +370,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00148-cc7` (asia-south1)
+**Cloud Run:** `drufiy-backend-00155-kbc` (asia-south1) — CPU throttling ON (default); background tasks throttled post-response
 **Frontend:** `prashbydrufiy.vercel.app`
 
 ---
@@ -373,9 +437,10 @@ agent_calls logging:
 | DeepSeek first-try fix_type accuracy | 73% (eval) | 85%+ (with retry loop) |
 | Kimi first-try fix_type accuracy | 87% (eval) | — (fallback) |
 | DeepSeek fallback rate | Unknown (just deployed) | <10% |
-| Latency p50 | ~15s | <20s |
-| Latency p90 | ~60s | <45s |
-| Cost per fix | Unknown | Track via agent_calls |
+| Latency p50 (DeepSeek) | **17.3s** (measured 2026-06-21) | <20s ✅ |
+| Latency max (DeepSeek) | **103.6s** (measured) | within 240s budget ✅ |
+| DeepSeek valid-output rate | **98%** (measured, n=77) | >95% ✅ |
+| Cost per call (DeepSeek) | **~$0.0095** (measured) | track |
 | workflow_config success rate | Was 0% (A8 fixed) | 50%+ |
 | environment success rate | Was 0% | 30%+ (with needs_secret UI) |
 
