@@ -82,7 +82,7 @@ def revoke_access_token(token: str, user_id: str | None = None) -> bool:
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
-            options={"verify_exp": False},
+            options={"verify_exp": False, "verify_aud": False},
         )
     except JWTError:
         return False
