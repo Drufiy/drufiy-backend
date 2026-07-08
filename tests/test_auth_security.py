@@ -54,7 +54,7 @@ class _Supabase:
 
 
 def _decode(token):
-    return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    return jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm], audience="drufiy-api")
 
 
 def test_access_token_contains_revocable_jti():
