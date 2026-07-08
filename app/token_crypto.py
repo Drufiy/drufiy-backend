@@ -6,7 +6,14 @@ from app.db import supabase
 logger = logging.getLogger(__name__)
 
 
+_warned_missing_key = False
+
+
 def token_encryption_key() -> str:
+    global _warned_missing_key
+    if not settings.token_encryption_key and not _warned_missing_key:
+        logger.warning("TOKEN_ENCRYPTION_KEY not set — falling back to JWT_SECRET. Set a separate key in production.")
+        _warned_missing_key = True
     return settings.token_encryption_key or settings.jwt_secret
 
 

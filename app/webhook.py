@@ -37,7 +37,7 @@ def verify_signature(body: bytes, header_signature: str | None) -> bool:
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
 def _check_rate_limit(repo_id: str) -> bool:
-    """Returns True if the webhook is allowed (under the limit). Best-effort — never raises."""
+    """Returns True if the webhook is allowed (under the limit). Fails closed on error."""
     try:
         result = supabase.rpc(
             "check_and_increment_webhook_rate_limit",
@@ -50,8 +50,8 @@ def _check_rate_limit(repo_id: str) -> bool:
         data = result.data or {}
         return data.get("allowed", True)
     except Exception as e:
-        logger.warning(f"Rate limit RPC failed, allowing through: {e}")
-        return True
+        logger.warning(f"Rate limit RPC failed — rejecting webhook: {e}")
+        return False
 
 
 def _is_fix_branch(branch: str) -> bool:
@@ -63,6 +63,10 @@ def _strip_fix_branch_prefix(branch: str) -> str:
         if branch.startswith(prefix):
             return branch[len(prefix):]
     return branch
+
+
+def _escape_like(s: str) -> str:
+    return s.replace("%", "").replace("_", "")
 
 
 async def _fetch_recent_workflow_runs(
@@ -107,7 +111,7 @@ async def handle_verification_event(payload: dict):
 
     # Parse run_id prefix from branch name: drufiy/fix-run-{prefix} or drufiy/fix-run-{prefix}-{ts}
     prefix_part = _strip_fix_branch_prefix(branch)
-    run_id_prefix = prefix_part[:8]
+    run_id_prefix = _escape_like(prefix_part[:8])
 
     ci_run_result = (
         supabase.table("ci_runs")
@@ -231,14 +235,21 @@ async def handle_verification_event(payload: dict):
 
             # Auto-merge: when the repo owner has enabled it and CI is green, merge the PR
             if repo.get("auto_merge") and diag.data:
-                pr_number = diag.data[0].get("github_pr_number")
-                if pr_number:
-                    await _auto_merge_pr(
-                        repo_full_name=repo_full_name,
-                        pr_number=pr_number,
-                        access_token=access_token,
-                        ci_run_id=ci_run_id,
-                    )
+                _fc = diag.data[0].get("files_changed") or []
+                _touches_workflow = any(
+                    (fc.get("path") or "").startswith(".github/workflows/") for fc in _fc
+                )
+                if _touches_workflow:
+                    logger.info(f"Skipping auto-merge for {ci_run_id} — PR modifies workflow files")
+                else:
+                    pr_number = diag.data[0].get("github_pr_number")
+                    if pr_number:
+                        await _auto_merge_pr(
+                            repo_full_name=repo_full_name,
+                            pr_number=pr_number,
+                            access_token=access_token,
+                            ci_run_id=ci_run_id,
+                        )
 
         else:
             prev_diag_result = (
@@ -390,7 +401,7 @@ async def handle_pr_outcome(payload: dict):
         # Branch format: prash/fix-run-{run_id_prefix}-{timestamp}
         for prefix in FIX_BRANCH_PREFIXES:
             if head_branch.startswith(prefix):
-                run_id_prefix = head_branch[len(prefix):].split("-")[0]
+                run_id_prefix = _escape_like(head_branch[len(prefix):].split("-")[0])
                 diag_result = (
                     supabase.table("diagnoses")
                     .select("id, created_at, run_id")

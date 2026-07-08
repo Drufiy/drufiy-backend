@@ -4,6 +4,7 @@ Protected by X-Internal-Secret header matching settings.internal_cron_secret.
 Never exposed to end-users.
 """
 
+import hmac
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -25,7 +26,7 @@ GITHUB_API = "https://api.github.com"
 def _require_cron_secret(x_internal_secret: str | None = Header(default=None)):
     if not settings.internal_cron_secret:
         raise HTTPException(status_code=503, detail="Internal cron secret not configured")
-    if x_internal_secret != settings.internal_cron_secret:
+    if not hmac.compare_digest(x_internal_secret or "", settings.internal_cron_secret):
         raise HTTPException(status_code=401, detail="Invalid internal secret")
 
 

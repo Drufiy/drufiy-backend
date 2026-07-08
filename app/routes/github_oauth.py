@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from secrets import token_urlsafe
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,6 +15,20 @@ from app.db import supabase
 from app.github_app import get_installation_token, github_app_enabled, list_installation_repos
 from app.notifier import notify_new_signup
 from app.token_crypto import get_github_token, store_github_token
+
+_ALLOWED_REDIRECT_ORIGINS = {
+    "http://localhost:3000",
+    "https://prash.drufiy.com",
+    "https://drufiy.com",
+}
+
+
+def _validate_redirect_uri(uri: str) -> None:
+    parsed = urlparse(uri)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    allowed = _ALLOWED_REDIRECT_ORIGINS | {settings.frontend_url}
+    if origin not in allowed:
+        raise HTTPException(status_code=400, detail={"error": "invalid_redirect_uri", "message": "Redirect URI is not allowed"})
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -67,6 +81,7 @@ async def github_login_url(body: OAuthLoginUrlRequest | None = None):
         "state": state,
     }
     if body and body.redirect_uri:
+        _validate_redirect_uri(body.redirect_uri)
         params["redirect_uri"] = body.redirect_uri
     return {
         "url": f"https://github.com/login/oauth/authorize?{urlencode(params)}",
@@ -89,8 +104,8 @@ async def github_callback(body: OAuthCallbackRequest):
         "client_secret": settings.github_client_secret,
         "code": body.code,
     }
-    # Including redirect_uri in the exchange prevents GitHub edge-case mismatches
     if body.redirect_uri:
+        _validate_redirect_uri(body.redirect_uri)
         exchange_payload["redirect_uri"] = body.redirect_uri
 
     async with httpx.AsyncClient(timeout=10.0) as client:

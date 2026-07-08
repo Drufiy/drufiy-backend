@@ -371,7 +371,7 @@ KIMI_MODEL=kimi-k2.6
 ```
 
 **Cloud Run:** `drufiy-backend-00155-kbc` (asia-south1) — CPU throttling ON (default); background tasks throttled post-response
-**Frontend:** `prashbydrufiy.vercel.app`
+**Frontend:** `prash.drufiy.com`
 
 ---
 
@@ -419,7 +419,7 @@ After PR is created:
     ⚠️ GAP: no active watching of fix branch CI — relies on webhook delivery
 
 Reconciler (every 60s):
-    → Sweeps: pending (>10min), diagnosing (>5min), applying (>3min), fixed (>3min)
+    → Sweeps: pending (>10min), diagnosing (>8min), applying (>3min), fixed (>3min)
     → Requeues or resolves stuck runs
 
 agent_calls logging:

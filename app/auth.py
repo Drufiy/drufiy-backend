@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ from app.token_crypto import get_github_token
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
 _revocation_table_available: bool | None = None
+_revocation_unavailable_since: float = 0
 
 
 def create_access_token(user_id: str, github_username: str) -> str:
@@ -23,6 +25,8 @@ def create_access_token(user_id: str, github_username: str) -> str:
         "jti": uuid4().hex,
         "iat": now,
         "exp": now + timedelta(hours=settings.jwt_expiry_hours),
+        "iss": "drufiy-backend",
+        "aud": "drufiy-api",
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
@@ -35,6 +39,8 @@ async def get_current_user(
             credentials.credentials,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
+            audience="drufiy-api",
+            issuer="drufiy-backend",
         )
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -58,8 +64,15 @@ async def get_current_user(
         "id": result.data["id"],
         "github_username": result.data["github_username"],
         "email": result.data.get("email"),
-        "github_access_token": get_github_token(user_id),
     }
+
+
+async def get_current_user_with_token(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+) -> dict:
+    user = await get_current_user(credentials)
+    user["github_access_token"] = get_github_token(user["id"])
+    return user
 
 
 def revoke_access_token(token: str, user_id: str | None = None) -> bool:
@@ -97,9 +110,12 @@ def revoke_access_token(token: str, user_id: str | None = None) -> bool:
 
 
 def _is_token_revoked(jti: str) -> bool:
-    global _revocation_table_available
+    global _revocation_table_available, _revocation_unavailable_since
     if _revocation_table_available is False:
-        return False
+        if time.monotonic() - _revocation_unavailable_since < 30:
+            # Fail closed: treat as revoked while table is unreachable
+            return True
+        # Retry after 30s cooldown
     try:
         result = (
             supabase.table("jwt_revocations")
@@ -112,8 +128,9 @@ def _is_token_revoked(jti: str) -> bool:
         return bool(result.data)
     except Exception as e:
         _revocation_table_available = False
-        logger.warning(f"JWT revocation check skipped because table is unavailable: {e}")
-        return False
+        _revocation_unavailable_since = time.monotonic()
+        logger.warning(f"JWT revocation check failed — failing closed: {e}")
+        return True
 
 
 def _timestamp_to_iso(value) -> str:

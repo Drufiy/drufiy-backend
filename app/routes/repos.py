@@ -6,7 +6,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_current_user_with_token
 from app.config import settings
 from app.db import supabase
 from app.github_app import get_installation_token, github_app_enabled
@@ -60,7 +60,7 @@ async def _best_token_for_repo(repo_full_name: str, user_id: str, oauth_token: s
 # ── List user's GitHub repos (not yet connected) ────────────────────────────
 
 @router.get("/github-list")
-async def list_github_repos(current_user: dict = Depends(get_current_user)):
+async def list_github_repos(current_user: dict = Depends(get_current_user_with_token)):
     token = current_user["github_access_token"]
     if not token:
         raise HTTPException(status_code=401, detail="GitHub token not available — please re-authenticate")
@@ -121,7 +121,7 @@ class ConnectRepoRequest(BaseModel):
 
 
 @router.post("/connect")
-async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(get_current_user)):
+async def connect_repo(body: ConnectRepoRequest, current_user: dict = Depends(get_current_user_with_token)):
     user_id = current_user["id"]
     token = current_user["github_access_token"]
     if not token:
@@ -374,7 +374,7 @@ async def _auto_install_workflow(repo_full_name: str, default_branch: str, token
 # ── Disconnect a repo ────────────────────────────────────────────────────────
 
 @router.delete("/{repo_id}")
-async def disconnect_repo(repo_id: str, current_user: dict = Depends(get_current_user)):
+async def disconnect_repo(repo_id: str, current_user: dict = Depends(get_current_user_with_token)):
     result = (
         supabase.table("connected_repos")
         .select("*")

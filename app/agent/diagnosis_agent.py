@@ -914,11 +914,23 @@ INVESTIGATION_TOOLS = [
 ]
 
 
+def _validate_investigation_path(path: str) -> str | None:
+    if ".." in path or path.startswith("/"):
+        return "Path must be relative and cannot contain '..'"
+    return None
+
+
 async def _execute_investigation_tool(tool_name: str, tool_args: dict, context: dict) -> str:
     if tool_name == "fetch_file":
-        return await _investigation_fetch_file(context, tool_args.get("path", ""))
+        path = tool_args.get("path", "")
+        if err := _validate_investigation_path(path):
+            return json.dumps({"error": err, "path": path})
+        return await _investigation_fetch_file(context, path)
     if tool_name == "list_directory":
-        return await _investigation_list_directory(context, tool_args.get("path", ""))
+        path = tool_args.get("path", "")
+        if err := _validate_investigation_path(path):
+            return json.dumps({"error": err, "path": path})
+        return await _investigation_list_directory(context, path)
     if tool_name == "search_code":
         return await _investigation_search_code(context, tool_args.get("query", ""))
     return json.dumps({"error": f"Unknown investigation tool: {tool_name}"})

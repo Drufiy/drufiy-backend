@@ -1,14 +1,15 @@
 import asyncio
 import base64
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
-from app.auth import get_current_user
+from app.auth import get_current_user, get_current_user_with_token
 from app.config import settings
 from app.db import supabase
 
@@ -394,7 +395,7 @@ def get_run(run_id: str, current_user: dict = Depends(get_current_user)):
 # ── GET /runs/{run_id}/logs ─────────────────────────────────────────────────
 
 @router.get("/{run_id}/logs")
-async def get_run_logs(run_id: str, current_user: dict = Depends(get_current_user)):
+async def get_run_logs(run_id: str, current_user: dict = Depends(get_current_user_with_token)):
     """
     Fetch CI logs for a run via backend proxy.
     Uses stored logs_url and backend GitHub auth.
@@ -404,6 +405,8 @@ async def get_run_logs(run_id: str, current_user: dict = Depends(get_current_use
     logs_url = ci_run.get("logs_url")
     if not logs_url:
         raise HTTPException(status_code=404, detail={"error": "logs_not_available", "message": "No logs URL stored for this run"})
+    if not logs_url.startswith("https://api.github.com/"):
+        raise HTTPException(status_code=400, detail={"error": "invalid_logs_url", "message": "Logs URL is not a valid GitHub API URL"})
 
     token = current_user.get("github_access_token")
     if not token:
@@ -458,7 +461,7 @@ async def get_run_logs(run_id: str, current_user: dict = Depends(get_current_use
 # ── POST /runs/{run_id}/apply-fix ────────────────────────────────────────────
 
 @router.post("/{run_id}/apply-fix")
-async def apply_fix(run_id: str, current_user: dict = Depends(get_current_user)):
+async def apply_fix(run_id: str, current_user: dict = Depends(get_current_user_with_token)):
     ci_run = _get_run_with_ownership(run_id, current_user["id"])
     diagnosis = _get_latest_diagnosis(run_id)
 
@@ -518,7 +521,7 @@ async def apply_fix(run_id: str, current_user: dict = Depends(get_current_user))
 # ── POST /runs/{run_id}/dry-run ───────────────────────────────────────────────
 
 @router.post("/{run_id}/dry-run")
-async def dry_run(run_id: str, current_user: dict = Depends(get_current_user)):
+async def dry_run(run_id: str, current_user: dict = Depends(get_current_user_with_token)):
     ci_run = _get_run_with_ownership(run_id, current_user["id"])
     diagnosis = _get_latest_diagnosis(run_id)
 
@@ -690,7 +693,7 @@ async def _run_force_fix(run_id: str, access_token: str):
 async def force_fix(
     run_id: str,
     background_tasks: BackgroundTasks,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user_with_token),
 ):
     """
     Bypass manual_required — re-diagnose with an explicit forcing prompt
@@ -712,16 +715,26 @@ async def force_fix(
 
 # ── POST /runs/{run_id}/add-secret ────────────────────────────────────────────
 
+_SECRET_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+
+
 class AddSecretRequest(BaseModel):
     name: str
     value: str
+
+    @field_validator("name")
+    @classmethod
+    def validate_secret_name(cls, v: str) -> str:
+        if not _SECRET_NAME_RE.match(v):
+            raise ValueError("Secret name must match [A-Z_][A-Z0-9_]*")
+        return v
 
 
 @router.post("/{run_id}/add-secret")
 async def add_secret(
     run_id: str,
     body: AddSecretRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user_with_token),
 ):
     """
     Add a GitHub Actions secret to the repo, then re-trigger the failed workflow.
@@ -805,7 +818,7 @@ class SkipTestRequest(BaseModel):
 async def skip_test(
     run_id: str,
     body: SkipTestRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user_with_token),
 ):
     """
     Open a fix PR that marks the specified test as skipped.

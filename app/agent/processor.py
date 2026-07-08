@@ -1016,6 +1016,19 @@ async def _apply_fix(
     """Create the fix PR and update ci_run + diagnoses tables."""
     _update_status(ci_run_id, "applying")
 
+    # Security: workflow files have privileged access to secrets — never auto-apply
+    _wf_paths = [fc.path for fc in diagnosis.files_changed if fc.path.startswith(".github/workflows/")]
+    if _wf_paths:
+        logger.warning(
+            f"Workflow file change in run {ci_run_id} ({_wf_paths}) — downgrading to review_recommended"
+        )
+        supabase.table("ci_runs").update({
+            "status": "diagnosed",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", ci_run_id).execute()
+        supabase.table("diagnoses").update({"fix_type": "review_recommended"}).eq("id", diagnosis_row["id"]).execute()
+        return
+
     # Diff-risk check before applying (guardrail against hallucinated rewrites)
     for file_change in diagnosis.files_changed:
         risk = await assess_diff_risk(
