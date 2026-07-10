@@ -385,6 +385,41 @@ Expanding into Kafka, Kubernetes, Docker, Terraform, Redis, PostgreSQL, load bal
 
 ---
 
+### INCIDENT: Smoke-test auto-merge silently gutted lagom-humanizer in production (discovered 2026-07-10)
+
+**Severity: Critical — safety-gate gap, not a diagnosis-quality bug.**
+
+Since April 27, Prash had been running its own smoke tests directly against `lagom-humanizer` (a real, live product — not a disposable fixture). The smoke-test harness deliberately breaks files (bad imports, type errors, forced dependency conflicts) to exercise the diagnosis/fix pipeline end-to-end, including auto-merge. Two of those "fixes" got auto-merged straight to `main` with zero human review:
+
+- `0331c2c` ("fix: app/page.tsx — drufiy auto-fix", merged via PR #2) gutted the real 699-line humanizer UI down to a 9-line stub — it patched just enough to unblock the TypeScript build, never restored the actual page.
+- `d502d99` ("fix: app/layout.tsx — drufiy auto-fix", merged via PR #1) overwrote the branded layout with generic `create-next-app` boilerplate, losing custom fonts and viewport config.
+
+Both merges passed CI (build + lint + tests all green) because nothing in that repo's CI checks for UI/content regressions — a "fix" that deletes real functionality to make the build pass is indistinguishable from a real fix at the CI-green signal alone. The broken build served production traffic for **months** before being noticed and manually restored (commit `6c6c5af` in lagom-humanizer, 2026-07-10).
+
+**Root cause:** `ci_runs.source` is tagged `"smoke_test"` vs `"user"` at ingest time (ROADMAP A13, `webhook.py:672-673`, commit-message substring match) — but that tag was **never read anywhere**. Auto-merge (`webhook.py:237`, gate for G4) only checked: `repos.auto_merge == True` + CI green + PR doesn't touch workflow files. The source tag was write-only analytics, fully decoupled from the merge decision. Any repo with `auto_merge=True` — including one being used as a smoke-test fixture — had its adversarially-broken "fixes" merged exactly like a real user's.
+
+**Fix shipped (2026-07-10):** `webhook.py:237` now checks `ci_run.get("source") == "smoke_test"` before auto-merging and skips it, logging the skip. This makes the existing tag load-bearing. Deployed via normal push (Cloud Build auto-deploy).
+
+**Still open:**
+- Flip `auto_merge=False` on lagom-humanizer's `connected_repos` row in Supabase (manual step, Aradhya).
+- **Audit the other 4 repos from the multi-repo test campaign** (trimly, hypnochic-v2, IRIS-backend, Appi-Claw) for the same exposure — any of them with `auto_merge=True` that also received smoke-test-sourced merges needs the same git-log-level inspection that caught this on lagom-humanizer. Audit query:
+  ```sql
+  SELECT
+    cr.repo_full_name,
+    cr.auto_merge,
+    COUNT(*) FILTER (WHERE r.source = 'smoke_test') AS smoke_test_runs,
+    COUNT(*) FILTER (WHERE r.source = 'smoke_test' AND d.pr_merged_at IS NOT NULL) AS smoke_test_runs_merged
+  FROM connected_repos cr
+  JOIN ci_runs r ON r.repo_id = cr.id
+  LEFT JOIN diagnoses d ON d.run_id = r.id
+  GROUP BY cr.repo_full_name, cr.auto_merge
+  ORDER BY smoke_test_runs_merged DESC;
+  ```
+  Any repo with `smoke_test_runs_merged > 0` needs manual git-history review of exactly what got merged.
+- Longer-term: smoke-test fixtures should be genuinely disposable repos, not real products (even the founder's own side projects) — commit-message-substring tagging is a fragile safety net, not a substitute for isolation.
+
+---
+
 ### Session N+5: Production Awareness (Read-Only First)
 
 **Why:** "Current coding tools don't know what's happening in production" — this is the moat. But touching production is high-blast-radius. Start read-only.

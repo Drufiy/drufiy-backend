@@ -239,7 +239,12 @@ async def handle_verification_event(payload: dict):
                 _touches_workflow = any(
                     (fc.get("path") or "").startswith(".github/workflows/") for fc in _fc
                 )
-                if _touches_workflow:
+                if ci_run.get("source") == "smoke_test":
+                    # Never auto-merge fixes for deliberately-broken smoke-test runs — a
+                    # "fix" that merely unblocks CI is not validated against real product
+                    # behavior. See ROADMAP.md "lagom-humanizer incident" (2026-07-10).
+                    logger.info(f"Skipping auto-merge for {ci_run_id} — run is tagged source=smoke_test")
+                elif _touches_workflow:
                     logger.info(f"Skipping auto-merge for {ci_run_id} — PR modifies workflow files")
                 else:
                     pr_number = diag.data[0].get("github_pr_number")
