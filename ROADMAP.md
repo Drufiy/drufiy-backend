@@ -1,6 +1,6 @@
 # Prash — Engineering Roadmap
 
-**Updated: 2026-06-21** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
+**Updated: 2026-07-10** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
 **Founders:** Aradhya Mishra + Maneesh Awasthi
 
 ---
@@ -108,6 +108,20 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 ---
 
 ## NEXT SESSIONS — PRIORITIZED BUILD LIST
+
+### CURRENT PRIORITY ORDER (as of 2026-07-10)
+
+| Priority | Task | Why |
+|----------|------|-----|
+| **P0** | L1: Masked exception diagnosis | Biggest success rate lever — wrong root cause when exception is swallowed |
+| **P0** | L2: Repeated-hypothesis detection | Stop retrying same wrong fix — force strategy change on identical failure |
+| **P1** | Deploy-aware repair (Vercel/Cloud Run) | Close "CI passed but deploy failed" user frustration gap |
+| **P1** | 3 manual security steps | Rotate leaked Google API key, set TOKEN_ENCRYPTION_KEY, verify re-login |
+| **P2** | Per-repo memory flywheel | Stop starting from scratch — Prash learns from each repo's history |
+| **P2** | Confidence recalibration (L3) | Outcome data exists — fix 85% confidence on wrong fixes |
+| **P3** | Production awareness (N+5) | Runtime/container logs, crash loop detection — entry to DevOps layer |
+
+---
 
 ### ~~Session N+1: Self-Verification Loop~~ — DONE (2026-06-14)
 
@@ -310,6 +324,64 @@ This is a **class of bug Prash systematically struggles with** and is the most i
 | Cost / call (est.) | ~$0.0095 | ~$0.003 (partial) |
 
 **Repo-level success this campaign:** 4/5 verified (80%); **fully autonomous: 3/5 (60%)** — matches the 60% end-to-end target, but IRIS needed assistance and lagom failed, so there is real headroom (L1–L3).
+
+---
+
+### Session 2026-07-10: Security Audit + Dependency Hardening — DONE
+
+**What shipped:** 15 code-level security fixes across 11 files + 5 Dependabot dependency bumps. All committed and deployed via git push (auto-deploy via Cloud Build).
+
+#### Security fixes applied
+
+| # | Fix | File(s) |
+|---|-----|---------|
+| S1 | OAuth CSRF — `oauth_state_required` flipped `True` | `config.py` |
+| S2 | JWT `iss`/`aud` claims added to `create_access_token()` and validated in `get_current_user()` | `auth.py` |
+| S3 | `github_access_token` removed from JWT payload; new `get_current_user_with_token()` dependency fetches it on-demand | `auth.py` |
+| S4 | JWT revocation check fails-closed (denies access when Supabase is down) with 30s retry window | `auth.py` |
+| S5 | `TOKEN_ENCRYPTION_KEY` startup warning (logs once on missing key) | `token_crypto.py` |
+| S6 | LIKE wildcard injection in branch name queries — `_escape_like()` strips `%` and `_` from run_id_prefix | `webhook.py` |
+| S7 | Rate limit check fails-closed on exception (was returning `True` = allowed) | `webhook.py` |
+| S8 | Auto-merge blocked if fix PR touches `.github/workflows/` files | `webhook.py`, `processor.py` |
+| S9 | SSRF on logs URL — validates prefix `https://api.github.com/` | `routes/runs.py` |
+| S10 | Secret name regex validation — `[A-Z_][A-Z0-9_]*` enforced via Pydantic field_validator | `routes/runs.py` |
+| S11 | 6 endpoints switched to `get_current_user_with_token` (no token in JWT) | `routes/runs.py` |
+| S12 | 3 repo endpoints switched to `get_current_user_with_token` | `routes/repos.py` |
+| S13 | Cron secret check uses `hmac.compare_digest` (timing-safe) | `routes/internal.py` |
+| S14 | Path traversal guard for investigation tool paths (`..` and absolute paths rejected) | `agent/diagnosis_agent.py` |
+| S15 | Redirect URI whitelist for OAuth callback — validates against allowed origins | `routes/github_oauth.py` |
+
+#### Dependency bumps (Dependabot)
+
+| Package | Old | New | CVE |
+|---------|-----|-----|-----|
+| python-jose | 3.3.0 | 3.5.0 | GHSA algorithm confusion |
+| PyNaCl | 1.5.0 | 1.6.2 | memory safety |
+| pytest | 8.3.3 | 9.0.3 | — (dev only) |
+| python-dotenv | 1.0.1 | 1.2.2 | — (dev only) |
+| pytest-asyncio | 0.24.0 | 1.4.0 | compat with pytest 9 |
+
+#### ⚠️ 3 manual steps still pending (remind at next session)
+
+1. **Rotate Google API key** `AIzaSyDMpYkAJiZ9KEnLVgOS0jPSRoBhRrMM-_o` — in git history from first commit
+2. **Set `TOKEN_ENCRYPTION_KEY`** as separate env var in Cloud Run — currently falling back to JWT_SECRET
+3. **Confirm re-login works** — JWT `aud`/`iss` change invalidates existing sessions; verify frontend handles 401 gracefully
+
+---
+
+### Strategic Direction Set (2026-07-10)
+
+**Decision: downstream depth, not outward breadth.**
+
+Expanding into Kafka, Kubernetes, Docker, Terraform, Redis, PostgreSQL, load balancing, Terraform, S3, etc. simultaneously is the wrong next move. At ~20-25% autonomous success rate, adding 10 new domains produces a product that "tries to help everywhere but helps almost nowhere."
+
+**The right path:** Push CI reliability to 60%+ first, then extend downstream one step at a time — CI → Deploy → Runtime → Production. Each step is the natural adjacent domain, reuses the diagnosis engine, and closes the "user left with another problem" gap.
+
+**Sequencing:**
+1. **P0: Fix L1 + L2** — masked exception diagnosis, repeated-hypothesis detection. Biggest single lever for success rate.
+2. **P1: Deploy-aware repair** — detect Vercel/Netlify/Cloud Run deploy failures after CI passes. Closes the "CI verified but deploy failed" user frustration. Builds on existing `external_checks.py`.
+3. **P2: Per-repo memory flywheel** — remember past fixes per repo, stop starting from scratch each run.
+4. **P3: Production/runtime awareness** — read-only crash loop detection, deploy-correlated error diagnosis. This is the entry point to Docker/k8s/Cloud Run logs — not a separate expansion, but the natural next step after deploy repair.
 
 ---
 

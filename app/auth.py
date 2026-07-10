@@ -82,6 +82,8 @@ def revoke_access_token(token: str, user_id: str | None = None) -> bool:
             token,
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
+            audience="drufiy-api",
+            issuer="drufiy-backend",
             options={"verify_exp": False},
         )
     except JWTError:

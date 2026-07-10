@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import httpx
 
-from app.agent.diagnosis_agent import diagnose_failure
+from app.agent.diagnosis_agent import compute_error_signature, diagnose_failure
 from app.agent.kimi_client import DiagnosisValidationError, mark_agent_run_outcome
 from app.agent.log_fetcher import (
     InsufficientPermissionsError,
@@ -137,7 +137,7 @@ async def process_failure(ci_run_id: str):
             return
 
         # ── 6. Store diagnosis ───────────────────────────────────────────────
-        diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=1)
+        diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=1, error_signature=compute_error_signature(logs))
         _update_status(ci_run_id, "diagnosed")
         logger.info(f"Diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type} confidence={diagnosis.confidence}")
 
@@ -275,6 +275,19 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
         # RAG: inject past verified fixes — especially useful on retry iterations
         similar_fixes_iter2 = _fetch_similar_fixes(repo["id"])
 
+        # L2: repeated-hypothesis detection — same error signature as the previous iteration
+        # means the previous fix didn't address the real cause. See ROADMAP.md lesson L2.
+        current_error_signature = compute_error_signature(new_logs)
+        repeated_failure = (
+            bool(previous_diagnosis.get("error_signature"))
+            and current_error_signature == previous_diagnosis.get("error_signature")
+        )
+        if repeated_failure:
+            logger.warning(
+                f"Iteration {next_iteration} for run {ci_run_id} has the IDENTICAL error signature "
+                f"as the previous iteration — forcing a strategy-change directive"
+            )
+
         try:
             diagnosis = await asyncio.wait_for(
                 diagnose_failure(
@@ -290,6 +303,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                     commit_diff=commit_diff or None,
                     current_files=current_files_iter2 or None,
                     similar_fixes=similar_fixes_iter2 or None,
+                    repeated_failure=repeated_failure,
                     investigation_context={
                         "repo_full_name": repo_full_name,
                         "access_token": access_token_iter2,
@@ -307,7 +321,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
             await _mark_failed(ci_run_id, "exhausted", str(e)[:300])
             return
 
-        diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=next_iteration)
+        diagnosis_row = _store_diagnosis(ci_run_id, diagnosis, iteration=next_iteration, error_signature=current_error_signature)
         _update_status(ci_run_id, "diagnosed")
         logger.info(f"Iteration {next_iteration} diagnosis stored for run {ci_run_id}: fix_type={diagnosis.fix_type}")
 
@@ -965,7 +979,7 @@ def _get_access_token(user_id: str) -> str | None:
     return get_github_token(user_id)
 
 
-def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
+def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int, error_signature: str | None = None) -> dict:
     row = {
         "run_id": ci_run_id,
         "iteration": iteration,
@@ -980,6 +994,7 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int) -> dict:
         "speculative": diagnosis.speculative,
         "files_changed": [fc.model_dump() for fc in diagnosis.files_changed],
         "required_secrets": diagnosis.required_secrets,
+        "error_signature": error_signature,
     }
 
     # Guard: if a diagnosis for this (run_id, iteration) already exists, update instead of insert

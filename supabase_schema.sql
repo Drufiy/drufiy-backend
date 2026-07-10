@@ -128,6 +128,7 @@ CREATE TABLE IF NOT EXISTS public.diagnoses (
   github_pr_number INT,
   verification_status TEXT CHECK (verification_status IN ('verified', 'failed', 'iterating') OR verification_status IS NULL),
   verification_checked_workflows JSONB,
+  error_signature TEXT,
   created_at TIMESTAMPTZ DEFAULT now()
 );
 

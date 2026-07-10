@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import re
@@ -467,6 +468,43 @@ Log: Node 20 passes, Node 22 fails with "ERR_IMPORT_ASSERTION_TYPE_MISSING"
   files_changed: [{path: "src/loader.ts", new_content: "<complete file using import attributes syntax>"}]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+MASKED / SWALLOWED EXCEPTIONS (READ CAREFULLY — a common wrong-diagnosis trap)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Sometimes the log shows only an AssertionError comparing a returned status/dict/result field \
+(e.g. `assert result["status"] == "ok"`, `assert response.status == 200`) with NO underlying \
+traceback (no KeyError, TypeError, AttributeError, etc. visible anywhere in the log). This is a \
+strong signal that the code under test has a broad `except Exception:` (or equivalent) that \
+CAUGHT the real error and returned a generic error status instead of letting it propagate. The \
+log only shows the downstream assertion — the actual cause never surfaces in CI output.
+
+WHEN YOU SEE THIS PATTERN:
+1. Do NOT pattern-match the surface symptom to the most common cause for that kind of call \
+   (e.g. "returns error" → "must be a network/subprocess issue"). That is frequently WRONG — \
+   it's guessing based on what the function usually fails at, not what actually happened here.
+2. Use fetch_file to read the source of the function that PRODUCES the asserted result.
+3. Look for a broad except block and reason about what could throw on the success path INSIDE \
+   that try block — a stubbed/mocked dependency missing a method, a bad attribute access on an \
+   object that isn't fully initialized in this environment, a closed resource, etc.
+4. If you can't be certain after investigating, lower confidence and use review_recommended \
+   rather than guessing at high confidence — a wrong high-confidence fix is worse than an \
+   honest uncertain one.
+
+EXAMPLE 17 — Masked exception (review_recommended, NOT the surface symptom)
+Log: "AssertionError: assert 'error' == 'ok'" in test_run_shell.py, calling run_shell("echo hello")
+No traceback, no KeyError/AttributeError visible anywhere in the log.
+  WRONG: fix_type: "safe_auto_apply", confidence: 0.85, category: "code",
+    fix_description: "Switch create_subprocess_exec to create_subprocess_shell"
+    ← This is guessing based on the function name, not the actual failure.
+  CORRECT: fetch_file("src/shell.py") reveals `except Exception as e: return {"status": "error"}` \
+    wrapping a `logger.debug(...)` call, and the test stubs a fake logger missing `.debug`.
+    fix_type: "review_recommended", confidence: 0.65, category: "code",
+    root_cause: "run_shell's success path calls logger.debug(), but the test's stub logger has no \
+    .debug method, raising AttributeError that is caught by the broad except and returned as \
+    status=error. The subprocess call itself works fine."
+    files_changed: [{path: "src/shell.py", new_content: "<file with logger.debug removed or guarded>"}]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 HOW TO READ CI LOGS
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -619,6 +657,52 @@ def _filter_section_lines(section: str) -> str:
     return "\n".join(out)
 
 
+# ── L1: masked exception detection ──────────────────────────────────────────
+# A failure that's just an assertion on a returned status/dict field, with no
+# revealing traceback anywhere in the log, means the real exception is likely
+# being swallowed by a broad except block. See ROADMAP.md lesson L1.
+
+_MASKED_EXCEPTION_ASSERT_RE = re.compile(
+    r"assert(?:ionerror)?\b.*(\[['\"]?\w+['\"]?\]|\.status\b|\.get\(|status\s*(==|!=)|['\"]error['\"]|['\"]ok['\"])",
+    re.IGNORECASE,
+)
+_REVEALING_EXCEPTION_RE = re.compile(
+    r"\b(KeyError|AttributeError|TypeError|ValueError|ConnectionError|NullPointerException|"
+    r"NoneType|panic:|RuntimeError|OSError|IOError)\b"
+)
+
+
+def _detect_masked_exception_risk(logs: str) -> bool:
+    if not logs:
+        return False
+    has_assert_on_result = bool(_MASKED_EXCEPTION_ASSERT_RE.search(logs))
+    has_revealing_traceback = bool(_REVEALING_EXCEPTION_RE.search(logs))
+    return has_assert_on_result and not has_revealing_traceback
+
+
+# ── L2: repeated-hypothesis detection ───────────────────────────────────────
+# Fingerprint a failure so iteration N can be compared against iteration N-1.
+# Normalizes out volatile details (timestamps, line numbers, addresses, paths)
+# so the same underlying failure hashes identically even if surrounding log
+# noise differs between runs. See ROADMAP.md lesson L2.
+
+_SIGNATURE_LINE_RE = re.compile(r"(assertionerror|error:|exception|failed|panic:|traceback)", re.IGNORECASE)
+_SIGNATURE_SCRUB_RE = re.compile(
+    r"(0x[0-9a-fA-F]+|:\d+:\d+|:\d+\b|\bline\s+\d+\b|\b\d{10,}\b|\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\S*"
+    r"|/[\w./-]+\.py\b|/[\w./-]+\.ts\b|/[\w./-]+\.js\b)",
+    re.IGNORECASE,
+)
+
+
+def compute_error_signature(logs: str) -> str:
+    preprocessed = _preprocess_logs(logs or "")
+    signature_lines = [line.strip() for line in preprocessed.splitlines() if _SIGNATURE_LINE_RE.search(line)]
+    if not signature_lines:
+        signature_lines = preprocessed.splitlines()[-10:]
+    normalized = "\n".join(_SIGNATURE_SCRUB_RE.sub("", line) for line in signature_lines)
+    return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 async def diagnose_failure(
@@ -633,6 +717,7 @@ async def diagnose_failure(
     commit_diff: str | None = None,
     current_files: dict[str, str] | None = None,   # {path: content} fetched from GitHub
     force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
+    repeated_failure: bool = False,   # iteration N failed with the identical error signature as N-1
     model: str = "auto",
     similar_fixes: list[dict] | None = None,        # Past verified fixes for this repo (RAG context)
     investigation_context: dict | None = None,
@@ -668,6 +753,35 @@ async def diagnose_failure(
         similar_fixes=similar_fixes,
     )
 
+    # L1: masked exception risk — assertion on a result/status field, no revealing traceback
+    if _detect_masked_exception_risk(preprocessed):
+        logger.info(f"Masked-exception risk detected for run {run_id} — injecting investigation directive")
+        user_prompt += (
+            "\n\n⚠️ MASKED EXCEPTION RISK: This failure is an assertion on a returned status/result "
+            "value, not a raw traceback. This strongly suggests the real exception is being caught by a "
+            "broad except block and converted into an error status/dict, so the true cause never appears "
+            "in the logs. Before finalizing your diagnosis, use fetch_file to read the source of the "
+            "function that PRODUCES the asserted result and reason about what could throw on its success "
+            "path (a stubbed/mocked dependency missing a method, a bad attribute access, a closed "
+            "connection, etc.) that gets swallowed. Do not assume the surface symptom is the root cause."
+        )
+
+    # L2: repeated hypothesis — iteration N failed with the identical error signature as N-1
+    if repeated_failure:
+        user_prompt += (
+            "\n\n⚠️ REPEATED FAILURE — SAME ERROR AS PREVIOUS ITERATION: The previous fix was applied "
+            "and pushed, but CI failed again with the IDENTICAL error signature. This means your "
+            "previous root-cause hypothesis was WRONG — the fix did not address the actual problem. "
+            "Do NOT propose a variation of the same fix. You must:\n"
+            "  1. Explicitly reconsider what could cause this EXACT failure that your previous diagnosis missed.\n"
+            "  2. Use fetch_file / search_code to investigate a DIFFERENT part of the codebase than last "
+            "time — the function that actually produces the failing output, not just the file you already changed.\n"
+            "  3. Consider whether the real error is being swallowed (see the masked-exception guidance above) "
+            "or whether a completely different component is responsible.\n"
+            "Repeating the same hypothesis will exhaust the remaining retry budget with no progress."
+        )
+        logger.info(f"Repeated-failure strategy-change directive injected for run {run_id}")
+
     # Force-fix: user has explicitly authorized — append strong override instruction
     if force_fix:
         user_prompt += (
@@ -679,6 +793,8 @@ async def diagnose_failure(
         logger.info(f"Force-fix mode enabled for run {run_id}")
 
     call_type = f"iteration_{iteration}_diagnosis" if iteration > 1 else "diagnosis"
+    if repeated_failure:
+        call_type = f"iteration_{iteration}_repeated_failure_diagnosis"
     if force_fix:
         call_type = "force_fix_diagnosis"
 
