@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS public.user_profiles (
   github_username TEXT NOT NULL,
   github_user_id BIGINT NOT NULL UNIQUE,
   github_access_token_encrypted BYTEA,
+  vercel_access_token_encrypted BYTEA,
   email TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
@@ -95,6 +96,10 @@ CREATE TABLE IF NOT EXISTS public.ci_runs (
   error_message TEXT,
   logs_url TEXT,
   verification_checked_workflows JSONB DEFAULT '[]'::jsonb,
+  deploy_check_pending BOOLEAN DEFAULT false,
+  deploy_check_started_at TIMESTAMPTZ,
+  deploy_check_commit_sha TEXT,
+  deploy_fix_attempts INT DEFAULT 0,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
@@ -105,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_ci_runs_commit_sha ON public.ci_runs(commit_sha);
 CREATE INDEX IF NOT EXISTS idx_ci_runs_status ON public.ci_runs(status);
 CREATE INDEX IF NOT EXISTS idx_ci_runs_fix_branch ON public.ci_runs(fix_branch_name) WHERE fix_branch_name IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_runs_repo_commit_run_unique ON public.ci_runs(repo_id, commit_sha, github_run_id);
+CREATE INDEX IF NOT EXISTS idx_ci_runs_deploy_check_pending ON public.ci_runs(updated_at) WHERE deploy_check_pending = true;
 
 -- =========================================================================
 -- AI diagnoses
@@ -112,7 +118,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_ci_runs_repo_commit_run_unique ON public.c
 CREATE TABLE IF NOT EXISTS public.diagnoses (
   id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
   run_id UUID REFERENCES public.ci_runs(id) ON DELETE CASCADE NOT NULL,
-  iteration INT DEFAULT 1 CHECK (iteration BETWEEN 1 AND 4),
+  iteration INT DEFAULT 1 CHECK (iteration BETWEEN 1 AND 6),
   problem_summary TEXT NOT NULL,
   root_cause TEXT NOT NULL,
   fix_description TEXT NOT NULL,
@@ -120,6 +126,7 @@ CREATE TABLE IF NOT EXISTS public.diagnoses (
   confidence FLOAT CHECK (confidence BETWEEN 0.0 AND 1.0),
   is_flaky_test BOOLEAN DEFAULT false,
   category TEXT,
+  failure_source TEXT DEFAULT 'ci' CHECK (failure_source IN ('ci', 'deploy')),
   logs_truncated_warning BOOLEAN DEFAULT false,
   speculative BOOLEAN DEFAULT false,
   required_secrets JSONB DEFAULT '[]'::jsonb,
@@ -203,6 +210,31 @@ CREATE OR REPLACE FUNCTION get_decrypted_token(
 ) RETURNS TEXT AS $$
   SELECT pgp_sym_decrypt(github_access_token_encrypted, p_key)
   FROM public.user_profiles WHERE id = p_user_id;
+$$ LANGUAGE SQL SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION store_encrypted_vercel_token(
+  p_user_id UUID, p_token TEXT, p_key TEXT
+) RETURNS VOID AS $$
+  UPDATE public.user_profiles
+  SET vercel_access_token_encrypted = pgp_sym_encrypt(p_token, p_key),
+      updated_at = now()
+  WHERE id = p_user_id;
+$$ LANGUAGE SQL SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION get_decrypted_vercel_token(
+  p_user_id UUID, p_key TEXT
+) RETURNS TEXT AS $$
+  SELECT pgp_sym_decrypt(vercel_access_token_encrypted, p_key)
+  FROM public.user_profiles WHERE id = p_user_id;
+$$ LANGUAGE SQL SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION clear_vercel_token(
+  p_user_id UUID
+) RETURNS VOID AS $$
+  UPDATE public.user_profiles
+  SET vercel_access_token_encrypted = NULL,
+      updated_at = now()
+  WHERE id = p_user_id;
 $$ LANGUAGE SQL SECURITY DEFINER;
 
 CREATE OR REPLACE FUNCTION check_and_increment_webhook_rate_limit(

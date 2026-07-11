@@ -47,3 +47,32 @@ def get_github_token(user_id: str) -> str | None:
         except Exception as e:
             logger.warning("GitHub token decrypt failed for user %s: %s", user_id, e)
     return None
+
+
+def store_vercel_token(user_id: str, access_token: str) -> None:
+    supabase.rpc(
+        "store_encrypted_vercel_token",
+        {
+            "p_user_id": user_id,
+            "p_token": access_token,
+            "p_key": token_encryption_key(),
+        },
+    ).execute()
+
+
+def get_vercel_token(user_id: str) -> str | None:
+    for key in token_decryption_keys():
+        try:
+            result = supabase.rpc(
+                "get_decrypted_vercel_token",
+                {"p_user_id": user_id, "p_key": key},
+            ).execute()
+            if result.data:
+                return result.data
+        except Exception as e:
+            logger.warning("Vercel token decrypt failed for user %s: %s", user_id, e)
+    return None
+
+
+def clear_vercel_token(user_id: str) -> None:
+    supabase.rpc("clear_vercel_token", {"p_user_id": user_id}).execute()

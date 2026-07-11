@@ -57,11 +57,13 @@ async def reconcile_stuck_verifications() -> int:
         fixed_cutoff = (now - timedelta(minutes=3)).isoformat()
 
         pending_cutoff = (now - timedelta(minutes=10)).isoformat()
+        deploy_check_cutoff = (now - timedelta(seconds=30)).isoformat()
 
         resolved += await _recover_stuck_pending(pending_cutoff)
         resolved += await _recover_stuck_diagnosing(diagnosing_cutoff)
         resolved += await _recover_stuck_applying(applying_cutoff)
         resolved += await _recover_stuck_fixed(fixed_cutoff)
+        resolved += await _recover_pending_deploy_checks(deploy_check_cutoff)
 
     finally:
         _reconciling = False
@@ -315,6 +317,67 @@ async def _recover_stuck_fixed(cutoff: str) -> int:
             resolved += await _reconcile_one(ci_run)
         except Exception as e:
             logger.warning(f"Reconciler: error on fixed run {ci_run['id'][:8]}: {e}")
+    return resolved
+
+
+async def _recover_pending_deploy_checks(cutoff: str) -> int:
+    """
+    Re-check Vercel deployments that were still BUILDING/QUEUED when we last looked.
+    Vercel usually finishes building after GitHub Actions does, so the inline check
+    in webhook.py's verification handler often catches it mid-build; this sweep is
+    what actually resolves it once Vercel finishes.
+    """
+    pending_result = (
+        supabase.table("ci_runs")
+        .select("*, connected_repos(*)")
+        .eq("deploy_check_pending", True)
+        .eq("status", "verified")
+        .lt("updated_at", cutoff)
+        .execute()
+    )
+    pending_runs = pending_result.data or []
+    if not pending_runs:
+        return 0
+
+    logger.info(f"Reconciler: found {len(pending_runs)} run(s) with a pending deploy check")
+    from app.agent.deploy_repair import handle_deploy_check
+
+    resolved = 0
+    for ci_run in pending_runs:
+        ci_run_id = ci_run["id"]
+        repo = ci_run.get("connected_repos") or {}
+        repo_full_name = repo.get("repo_full_name", "")
+        user_id = repo.get("user_id", "")
+        commit_sha = ci_run.get("deploy_check_commit_sha", "")
+        if not repo_full_name or not user_id or not commit_sha:
+            continue
+        try:
+            access_token = await get_repo_access_token(repo)
+            if not access_token:
+                continue
+            diag = (
+                supabase.table("diagnoses")
+                .select("github_pr_number")
+                .eq("run_id", ci_run_id)
+                .order("iteration", desc=True)
+                .limit(1)
+                .execute()
+            )
+            pr_number = diag.data[0].get("github_pr_number") if diag.data else None
+            still_blocked = await handle_deploy_check(
+                ci_run_id=ci_run_id,
+                repo_full_name=repo_full_name,
+                commit_sha=commit_sha,
+                access_token=access_token,
+                user_id=user_id,
+                default_branch=repo.get("default_branch") or "main",
+                pr_number=pr_number,
+                fix_branch=ci_run.get("fix_branch_name"),
+            )
+            if not still_blocked:
+                resolved += 1
+        except Exception as e:
+            logger.warning(f"Reconciler: deploy check failed for run {ci_run_id[:8]}: {e}")
     return resolved
 
 

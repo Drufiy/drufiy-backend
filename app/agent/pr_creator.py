@@ -295,6 +295,7 @@ async def push_fix_to_branch(
     diagnosis: dict,
     iteration: int,
     pr_number: int | None = None,
+    failure_source: str = "ci",
 ) -> dict:
     """Push a retry fix to an existing fix branch. No new branch, no new PR."""
     headers = {
@@ -311,9 +312,14 @@ async def push_fix_to_branch(
         )
 
         if pr_number:
+            if failure_source == "deploy":
+                heading = f"## 🚀 Drufiy Deploy Fix — Attempt {iteration}\n\n"
+                intro = "CI passed but the Vercel deployment failed. Prash diagnosed the build log and pushed a new commit.\n\n"
+            else:
+                heading = f"## 🔄 Drufiy Retry — Iteration {iteration}\n\n"
+                intro = "CI failed on the previous fix. Prash re-diagnosed and pushed a new commit.\n\n"
             comment_body = (
-                f"## 🔄 Drufiy Retry — Iteration {iteration}\n\n"
-                f"CI failed on the previous fix. Prash re-diagnosed and pushed a new commit.\n\n"
+                heading + intro +
                 f"**Updated Root Cause**\n{diagnosis.get('root_cause', 'N/A')}\n\n"
                 f"**Updated Fix**\n{diagnosis.get('fix_description', 'N/A')}\n\n"
                 f"**Files Changed**\n"

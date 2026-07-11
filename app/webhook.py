@@ -214,16 +214,38 @@ async def handle_verification_event(payload: dict):
             if diag.data:
                 supabase.table("diagnoses").update({"verification_status": "verified"}).eq("id", diag.data[0]["id"]).execute()
 
-            # Check for failing external checks (Vercel, Netlify, etc.)
+            # Check the Vercel deployment for this fix commit. Repos where the owner has
+            # connected a Vercel token get active diagnosis + auto-fix (deploy_repair);
+            # everyone else falls back to the passive external-checks note. Smoke-test
+            # runs never get an active deploy-fix push — see the auto-merge guard below
+            # and ROADMAP.md "lagom-humanizer incident" (2026-07-10) for why.
             fix_sha = completed_runs[0]["head_sha"] if completed_runs else ""
+            pr_number = diag.data[0].get("github_pr_number") if diag.data else None
+            is_smoke_test = ci_run.get("source") == "smoke_test"
+            block_merge_for_deploy = False
             if fix_sha:
-                ext_note = await detect_external_check_failures(
-                    repo_full_name, fix_sha, access_token
-                )
-                if ext_note:
-                    supabase.table("ci_runs").update({
-                        "external_checks_note": ext_note,
-                    }).eq("id", ci_run_id).execute()
+                deploy_handled = False
+                if not is_smoke_test:
+                    from app.agent.deploy_repair import handle_deploy_check
+                    block_merge_for_deploy = await handle_deploy_check(
+                        ci_run_id=ci_run_id,
+                        repo_full_name=repo_full_name,
+                        commit_sha=fix_sha,
+                        access_token=access_token,
+                        user_id=repo.get("user_id"),
+                        default_branch=repo.get("default_branch") or "main",
+                        pr_number=pr_number,
+                        fix_branch=ci_run.get("fix_branch_name"),
+                    )
+                    deploy_handled = block_merge_for_deploy
+                if not deploy_handled:
+                    ext_note = await detect_external_check_failures(
+                        repo_full_name, fix_sha, access_token
+                    )
+                    if ext_note:
+                        supabase.table("ci_runs").update({
+                            "external_checks_note": ext_note,
+                        }).eq("id", ci_run_id).execute()
 
             # Update known_good_files
             _update_known_good_files(ci_run, repo["id"])
@@ -234,12 +256,12 @@ async def handle_verification_event(payload: dict):
                 await notify_verified(ci_run_id, repo_full_name, pr_url)
 
             # Auto-merge: when the repo owner has enabled it and CI is green, merge the PR
-            if repo.get("auto_merge") and diag.data:
+            if repo.get("auto_merge") and diag.data and not block_merge_for_deploy:
                 _fc = diag.data[0].get("files_changed") or []
                 _touches_workflow = any(
                     (fc.get("path") or "").startswith(".github/workflows/") for fc in _fc
                 )
-                if ci_run.get("source") == "smoke_test":
+                if is_smoke_test:
                     # Never auto-merge fixes for deliberately-broken smoke-test runs — a
                     # "fix" that merely unblocks CI is not validated against real product
                     # behavior. See ROADMAP.md "lagom-humanizer incident" (2026-07-10).
@@ -247,7 +269,6 @@ async def handle_verification_event(payload: dict):
                 elif _touches_workflow:
                     logger.info(f"Skipping auto-merge for {ci_run_id} — PR modifies workflow files")
                 else:
-                    pr_number = diag.data[0].get("github_pr_number")
                     if pr_number:
                         await _auto_merge_pr(
                             repo_full_name=repo_full_name,

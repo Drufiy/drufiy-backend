@@ -223,6 +223,12 @@ try:
 except ImportError:
     logger.warning("app.routes.internal not found — skipping")
 
+try:
+    from app.routes.settings import router as settings_router
+    app.include_router(settings_router, prefix="/settings", tags=["settings"])
+except ImportError:
+    logger.warning("app.routes.settings not found — skipping")
+
 
 if __name__ == "__main__":
     import uvicorn

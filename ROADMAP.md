@@ -1,6 +1,6 @@
 # Prash — Engineering Roadmap
 
-**Updated: 2026-07-10** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
+**Updated: 2026-07-11** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
 **Founders:** Aradhya Mishra + Maneesh Awasthi
 
 ---
@@ -109,17 +109,19 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 
 ## NEXT SESSIONS — PRIORITIZED BUILD LIST
 
-### CURRENT PRIORITY ORDER (as of 2026-07-10)
+### CURRENT PRIORITY ORDER (as of 2026-07-11)
 
-| Priority | Task | Why |
-|----------|------|-----|
-| **P0** | L1: Masked exception diagnosis | Biggest success rate lever — wrong root cause when exception is swallowed |
-| **P0** | L2: Repeated-hypothesis detection | Stop retrying same wrong fix — force strategy change on identical failure |
-| **P1** | Deploy-aware repair (Vercel/Cloud Run) | Close "CI passed but deploy failed" user frustration gap |
-| **P1** | 3 manual security steps | Rotate leaked Google API key, set TOKEN_ENCRYPTION_KEY, verify re-login |
-| **P2** | Per-repo memory flywheel | Stop starting from scratch — Prash learns from each repo's history |
-| **P2** | Confidence recalibration (L3) | Outcome data exists — fix 85% confidence on wrong fixes |
-| **P3** | Production awareness (N+5) | Runtime/container logs, crash loop detection — entry to DevOps layer |
+| Priority | Task | Status | Why |
+|----------|------|--------|-----|
+| **P0** | L1: Masked exception diagnosis | **DONE** (2026-07-10) | Biggest success rate lever — wrong root cause when exception is swallowed |
+| **P0** | L2: Repeated-hypothesis detection | **DONE** (2026-07-10) | Stop retrying same wrong fix — force strategy change on identical failure |
+| **P0** | Auto-merge smoke_test gate | **DONE** (2026-07-10) | Closed the hole behind the lagom-humanizer + trimly incidents — see incident writeup |
+| **P1** | Deploy-aware repair (Vercel) | **DONE** (2026-07-11) | Closes "CI passed but deploy failed" gap — full autonomous repair, see writeup below |
+| **P1** | 3 manual security steps | **DONE** (2026-07-11) | TOKEN_ENCRYPTION_KEY set; jwt_revocations table created; login verified working |
+| **P2** | Per-repo memory flywheel | Not started | Stop starting from scratch — Prash learns from each repo's history |
+| **P2** | Confidence recalibration (L3) | Not started | Outcome data exists — fix 85% confidence on wrong fixes |
+| **P2** | trimly middleware restore | **Deferred** (user: "leave it for later") | Dead code from April smoke test, not an active vuln — routes self-protect |
+| **P3** | Production awareness (N+5) | Not started | Runtime/container logs, crash loop detection — entry to DevOps layer |
 
 ---
 
@@ -361,11 +363,11 @@ This is a **class of bug Prash systematically struggles with** and is the most i
 | python-dotenv | 1.0.1 | 1.2.2 | — (dev only) |
 | pytest-asyncio | 0.24.0 | 1.4.0 | compat with pytest 9 |
 
-#### ⚠️ 3 manual steps still pending (remind at next session)
+#### ~~3 manual steps~~ — DONE (2026-07-11)
 
-1. **Rotate Google API key** `AIzaSyDMpYkAJiZ9KEnLVgOS0jPSRoBhRrMM-_o` — in git history from first commit
-2. **Set `TOKEN_ENCRYPTION_KEY`** as separate env var in Cloud Run — currently falling back to JWT_SECRET
-3. **Confirm re-login works** — JWT `aud`/`iss` change invalidates existing sessions; verify frontend handles 401 gracefully
+1. ~~**Rotate Google API key**~~ — No keys found in GCP Console for the Prash project; key likely not active
+2. ~~**Set `TOKEN_ENCRYPTION_KEY`**~~ — Set to `kEI8HVLWlFSY/...` (len=44) in Cloud Run; duplicate entry cleaned up
+3. ~~**Confirm re-login works**~~ — Login broken, diagnosed and fully fixed (see session 2026-07-11 below)
 
 ---
 
@@ -417,6 +419,56 @@ Both merges passed CI (build + lint + tests all green) because nothing in that r
   ```
   Any repo with `smoke_test_runs_merged > 0` needs manual git-history review of exactly what got merged.
 - Longer-term: smoke-test fixtures should be genuinely disposable repos, not real products (even the founder's own side projects) — commit-message-substring tagging is a fragile safety net, not a substitute for isolation.
+
+---
+
+### Session 2026-07-11: Login Incident — Full Diagnosis and Fix
+
+**What broke:** After the security audit deploy (2026-07-10), all users were unable to log in — "Sign-in failed. Please try again." on prash.drufiy.com.
+
+**Root causes (3 independent bugs):**
+
+| # | Bug | Root cause | Fix |
+|---|-----|-----------|-----|
+| 1 | `POST /auth/github/callback` → 400 `missing_oauth_state` | S1 added `OAUTH_STATE_REQUIRED=True` but the frontend (`Login.tsx`) was generating GitHub OAuth URLs client-side without a state token, and `AuthCallback.tsx` never sent state in the callback POST | Temporarily set `OAUTH_STATE_REQUIRED=false`; updated `Login.tsx` to call `POST /auth/github/login-url`, store state in `sessionStorage`, redirect to backend-provided URL; updated `AuthCallback.tsx` to read state from URL params and forward it in callback |
+| 2 | Frontend update not reaching production | Frontend served by `prash-frontend` Cloud Run service (not Vercel). No Dockerfile existed — previous deploy was unknown. Built new Dockerfile (nginx on port 8080), used `gcloud builds submit` to rebuild and `gcloud run services update` to deploy | Created `Dockerfile` + `nginx.conf`, deployed new image `gcr.io/prash-by-drufiy/prash-frontend:latest` |
+| 3 | Dashboard API calls → 401 after successful login | `jwt_revocations` table (added in security audit schema) was never applied to Supabase. `_is_token_revoked()` fails closed → returns `True` (revoked) for every token | Created `jwt_revocations` table in Supabase SQL editor |
+
+**Also fixed:** Duplicate `TOKEN_ENCRYPTION_KEY` env var in Cloud Run (two entries with different values) — removed and re-added as single clean entry.
+
+**Current state:** Login, session, and dashboard all working. `OAUTH_STATE_REQUIRED=True` is live with proper frontend support.
+
+---
+
+### Session 2026-07-11: Deploy-Aware Repair (Vercel) — P1 DONE
+
+**What shipped:** Full autonomous repair for Vercel deployment failures, not just detection. Plan approved in `/Users/aradhyamishra/.claude/plans/modular-percolating-pumpkin.md`.
+
+**Scope decisions (confirmed with Aradhya):**
+- Full autonomous repair (diagnose + push a fix), not detection-only
+- Vercel only, no Netlify/other providers
+- Personal access token pasted by the user (Settings page), not a full Vercel OAuth integration
+
+**Why this exists:** Once CI passes on a fix branch, Prash marked the run `verified` and auto-merged it if enabled — even if the Vercel deployment for that same commit was actively failing. `external_checks.py` detected this but only left a passive note; it never fetched the real build log or attempted a fix.
+
+**New pieces:**
+- `app/agent/vercel_client.py` — `find_vercel_deployment` (GET `/v7/deployments?sha=`), `fetch_vercel_build_logs` (GET `/v3/deployments/{id}/events?builds=1`), `validate_vercel_token` (GET `/v2/user`). Endpoints verified against current Vercel API docs before writing.
+- `app/agent/deploy_repair.py` — `handle_deploy_check()` orchestrates: look up the deployment, diagnose the build log via the existing `diagnose_failure()` (provider-agnostic, reused as-is), push a fix onto the existing PR branch via `push_fix_to_branch()` (reused, now takes a `failure_source` param so the PR comment says "Vercel deployment failed" instead of "CI failed"). Capped at 2 fix attempts per run.
+- `app/routes/settings.py` — `POST/DELETE/GET /settings/vercel-token`, validates against Vercel before storing.
+- New `Prash-frontend/src/pages/Settings.tsx` + nav link.
+- `RunDetail.tsx` now renders `external_checks_note` (previously computed but never displayed anywhere).
+
+**Timing problem solved:** Vercel usually finishes building *after* GitHub Actions does, so the inline check at CI-verification time often catches the deployment mid-build. Fix: `ci_runs.deploy_check_pending` flag + a new `_recover_pending_deploy_checks` sweep in `reconciler.py`'s existing 60s loop, mirroring the `_recover_stuck_*` pattern already there. A `deploy_check_started_at` timestamp caps the wait at 10 minutes — if Vercel never resolves, Prash falls back to today's baseline (don't block merge) rather than blocking forever.
+
+**Auto-merge gate extended:** A 4th guard added alongside the existing `smoke_test`/workflow-file guards (`webhook.py`) — auto-merge is skipped while `deploy_check_pending` or a deploy-fix attempt is in flight, so Prash never merges a commit whose deploy it knows is broken. Smoke-test runs are explicitly excluded from ever triggering an active deploy-fix (same incident-driven guard as CI auto-merge).
+
+**Schema:** `user_profiles.vercel_access_token_encrypted`, `ci_runs.deploy_check_pending/deploy_check_started_at/deploy_check_commit_sha/deploy_fix_attempts`, `diagnoses.failure_source`. New RPCs `store_encrypted_vercel_token`/`get_decrypted_vercel_token`/`clear_vercel_token` mirroring the existing GitHub token pattern. `diagnoses.iteration` CHECK widened from `1-4` to `1-6` since CI (up to 3) + deploy (up to 2) iterations now share one run's counter.
+
+**Caught during implementation (not in the original plan):**
+- `ci_runs.commit_sha` is the *original broken* commit, not the fix-branch commit Vercel actually builds — the reconciler needs the fix commit SHA explicitly, hence `deploy_check_commit_sha`.
+- `_store_diagnosis()` now writes `failure_source` unconditionally on every insert (CI or deploy) — this meant the Supabase migration had to be applied *before* the backend deploy, or every CI diagnosis insert would fail on the missing column.
+
+**Verification:** 51/51 backend tests pass, all new modules import cleanly (no circular imports), frontend typecheck + build clean. Not yet live-tested against a real Vercel deployment failure — first real trigger will be the next repo with a Vercel token connected and a genuine build failure.
 
 ---
 

@@ -979,7 +979,13 @@ def _get_access_token(user_id: str) -> str | None:
     return get_github_token(user_id)
 
 
-def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int, error_signature: str | None = None) -> dict:
+def _store_diagnosis(
+    ci_run_id: str,
+    diagnosis,
+    iteration: int,
+    error_signature: str | None = None,
+    failure_source: str = "ci",
+) -> dict:
     row = {
         "run_id": ci_run_id,
         "iteration": iteration,
@@ -995,6 +1001,7 @@ def _store_diagnosis(ci_run_id: str, diagnosis, iteration: int, error_signature:
         "files_changed": [fc.model_dump() for fc in diagnosis.files_changed],
         "required_secrets": diagnosis.required_secrets,
         "error_signature": error_signature,
+        "failure_source": failure_source,
     }
 
     # Guard: if a diagnosis for this (run_id, iteration) already exists, update instead of insert
