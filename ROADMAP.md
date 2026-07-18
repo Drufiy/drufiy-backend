@@ -118,7 +118,7 @@ DeepSeek V4 has **thinking ON by default**. Forced `tool_choice` (type: function
 | **P0** | Auto-merge smoke_test gate | **DONE** (2026-07-10) | Closed the hole behind the lagom-humanizer + trimly incidents — see incident writeup |
 | **P1** | Deploy-aware repair (Vercel) | **DONE** (2026-07-11) | Closes "CI passed but deploy failed" gap — full autonomous repair, see writeup below |
 | **P1** | 3 manual security steps | **DONE** (2026-07-11) | TOKEN_ENCRYPTION_KEY set; jwt_revocations table created; login verified working |
-| **P2** | Per-repo memory flywheel | Not started | Stop starting from scratch — Prash learns from each repo's history |
+| **P2** | Per-repo memory flywheel | **PARTIAL** — M1 repo-memory builder shipped (2026-07-18) | Stop starting from scratch — Prash learns from each repo's history |
 | **P2** | Confidence recalibration (L3) | Not started | Outcome data exists — fix 85% confidence on wrong fixes |
 | **P2** | trimly middleware restore | **Deferred** (user: "leave it for later") | Dead code from April smoke test, not an active vuln — routes self-protect |
 | **P3** | Production awareness (N+5) | Not started | Runtime/container logs, crash loop detection — entry to DevOps layer |
@@ -493,6 +493,29 @@ Both merges passed CI (build + lint + tests all green) because nothing in that r
 ---
 
 ### Backlog (do later, not forgotten)
+
+### Session N+6: Per-Repo Memory Flywheel — IN PROGRESS (2026-07-18)
+
+**Milestone M1 shipped:** Added `app/agent/repo_memory.py`, a repo-specific memory builder over existing Supabase data.
+
+What M1 captures:
+- recent same-repo verified fixes
+- repeated error signatures
+- category-level outcome rates
+- dependency fix patterns
+- known flaky tests
+- known-good files available for diff-risk comparison
+
+Why it matters: this replaces shallow "recent verified fixes" context with a structured repo memory object that can become the diagnosis prior for every run.
+
+Verification:
+- `pytest tests/test_repo_memory.py` passes.
+
+Next milestones:
+- M2: inject repo memory into first-pass and retry diagnosis prompts.
+- M3: calibrate confidence using historical repo/category outcomes.
+- M4: harden dependency chain completeness for peer and type packages.
+- M5: broader tests and final roadmap/deploy verification.
 
 | Item | Description | From |
 |------|-------------|------|

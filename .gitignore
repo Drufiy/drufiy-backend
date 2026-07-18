@@ -1,5 +1,17 @@
 .env
 .env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.crt
+*.cert
+service-account*.json
+google-credentials*.json
+credentials*.json
+secrets*.json
 venv
 .venv
 __pycache__
