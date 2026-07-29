@@ -520,8 +520,15 @@ What changed:
 
 Not yet done as part of M2: `deploy_repair.py`, `push_handler.py`, and the `routes/runs.py` force-fix path still diagnose without repo memory context — they predate the RAG path entirely, so this isn't a regression, just an opportunity for a later pass.
 
+**Milestone M3 shipped (2026-07-29):** Confidence recalibration against historical repo/category outcomes.
+
+What changed:
+- `diagnosis_agent.py`: new `_recalibrate_confidence(diagnosis, repo_memory, run_id)` runs before the existing static confidence gates. It caps stated confidence at `effective_verified_rate + 0.2` for the diagnosis's category in this repo, where `effective_verified_rate = max(0, verified - reverted) / attempts` — a fix that got reverted within 7 days is treated as a failure, not a success, even though `verification_status` was `"verified"` at merge time. Naive `verified_rate` alone would miss that.
+- Only acts once a category has `MIN_CALIBRATION_SAMPLES = 4` attempts for that repo — below that the sample is too noisy to trust, so the model's own confidence stands.
+- The capped confidence then flows through the existing static downgrade gates (`<0.6` → `review_recommended`, `<0.4` → `manual_required` for certain categories) unchanged, so a poor track record gets the same downstream treatment as genuinely low model confidence — no new fix_type logic duplicated.
+- Verification: 6 new unit tests in `tests/test_confidence_calibration.py` (cap applied, minimum-sample gate, reverted-fixes-count-against-rate, good-track-record no-op, no-repo-memory no-op, different-category no-op). Full suite: 58 passed, 25 skipped (live-API-gated), no regressions.
+
 Next milestones:
-- M3: calibrate confidence using historical repo/category outcomes.
 - M4: harden dependency chain completeness for peer and type packages.
 - M5: broader tests and final roadmap/deploy verification.
 

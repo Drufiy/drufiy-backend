@@ -14,6 +14,10 @@ from app.agent.schemas import Diagnosis
 
 logger = logging.getLogger(__name__)
 
+# M3: minimum same-repo/category attempts before historical outcomes are trusted
+# enough to cap stated confidence. Below this, the sample is too noisy to act on.
+MIN_CALIBRATION_SAMPLES = 4
+
 
 # ── Tool schema ───────────────────────────────────────────────────────────────
 
@@ -841,6 +845,11 @@ async def diagnose_failure(
         logger.error(f"Kimi tool call failed Pydantic validation for run {run_id}: {e}")
         raise DiagnosisValidationError(f"Schema validation failed: {e}")
 
+    # M3: cap stated confidence against this repo/category's historical track record
+    # before the static gates below act on it, so a poor track record can push a
+    # diagnosis through the same downgrade path as genuinely low model confidence.
+    diagnosis = _recalibrate_confidence(diagnosis, repo_memory, run_id=run_id)
+
     # ── Post-validation business rule overrides ───────────────────────────────
     updates: dict = {}
 
@@ -942,6 +951,47 @@ def _apply_deterministic_guardrails(
     if not updates:
         return diagnosis
     return diagnosis.model_copy(update=updates)
+
+
+def _recalibrate_confidence(
+    diagnosis: Diagnosis,
+    repo_memory: RepoMemory | None,
+    run_id: str | None = None,
+) -> Diagnosis:
+    """
+    M3: cap stated confidence against this repo's actual track record for the
+    diagnosis category. A category that verifies 20% of the time doesn't get to
+    claim 90%+ confidence just because the model feels sure this time.
+
+    Reverted fixes count against the rate even though they were "verified" at
+    merge time — a fix that got reverted within 7 days was not actually a
+    success, and category_outcomes.verified_rate alone doesn't reflect that.
+    """
+    if not repo_memory:
+        return diagnosis
+
+    stats = repo_memory.category_outcomes.get(diagnosis.category)
+    if not stats:
+        return diagnosis
+
+    attempts = stats.get("attempts", 0)
+    if attempts < MIN_CALIBRATION_SAMPLES:
+        return diagnosis
+
+    effective_verified = max(0, stats.get("verified", 0) - stats.get("reverted", 0))
+    effective_rate = effective_verified / attempts
+    calibrated_ceiling = round(min(1.0, effective_rate + 0.2), 2)
+
+    if diagnosis.confidence <= calibrated_ceiling:
+        return diagnosis
+
+    logger.info(
+        f"Confidence recalibration: run={run_id} category={diagnosis.category} "
+        f"model_confidence={diagnosis.confidence} effective_verified_rate={round(effective_rate, 2)} "
+        f"(verified={stats.get('verified', 0)} reverted={stats.get('reverted', 0)} attempts={attempts}) "
+        f"-> capped at {calibrated_ceiling}"
+    )
+    return diagnosis.model_copy(update={"confidence": calibrated_ceiling})
 
 
 def _extract_missing_modules(logs: str) -> list[str]:
