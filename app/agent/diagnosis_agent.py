@@ -9,6 +9,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.agent.kimi_client import DiagnosisValidationError, call_with_investigation, call_with_tool
+from app.agent.repo_memory import RepoMemory
 from app.agent.schemas import Diagnosis
 
 logger = logging.getLogger(__name__)
@@ -719,7 +720,8 @@ async def diagnose_failure(
     force_fix: bool = False,   # User explicitly authorized: skip manual_required, produce files_changed
     repeated_failure: bool = False,   # iteration N failed with the identical error signature as N-1
     model: str = "auto",
-    similar_fixes: list[dict] | None = None,        # Past verified fixes for this repo (RAG context)
+    similar_fixes: list[dict] | None = None,        # Legacy: past verified fixes for this repo
+    repo_memory: RepoMemory | None = None,          # Structured repo-specific memory context
     investigation_context: dict | None = None,
 ) -> Diagnosis:
     """
@@ -751,6 +753,7 @@ async def diagnose_failure(
         preprocessed, repo_full_name, commit_message,
         workflow_name, iteration, previous_diagnosis, current_files, commit_sha, commit_diff,
         similar_fixes=similar_fixes,
+        repo_memory=repo_memory,
     )
 
     # L1: masked exception risk — assertion on a result/status field, no revealing traceback
@@ -1125,6 +1128,7 @@ def _build_user_prompt(
     commit_sha: str | None,
     commit_diff: str | None,
     similar_fixes: list[dict] | None = None,
+    repo_memory: RepoMemory | None = None,
 ) -> str:
     parts = [
         f"REPOSITORY: {repo_full_name}",
@@ -1135,8 +1139,13 @@ def _build_user_prompt(
     if commit_sha:
         parts.append(f"COMMIT SHA: {commit_sha}")
 
+    if repo_memory:
+        context = repo_memory.as_prompt_context()
+        if context:
+            parts.append(context)
+
     # RAG: inject past verified fixes for this repo as few-shot context
-    if similar_fixes:
+    if similar_fixes and not repo_memory:
         rag_lines = [
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "PAST VERIFIED FIXES FOR THIS REPO (use these as reference — same patterns may apply)",

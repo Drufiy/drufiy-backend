@@ -511,8 +511,16 @@ Why it matters: this replaces shallow "recent verified fixes" context with a str
 Verification:
 - `pytest tests/test_repo_memory.py` passes.
 
+**Milestone M2 shipped (2026-07-29):** Repo memory is now the live diagnosis context — the shallow duplicate RAG path is retired.
+
+What changed:
+- `processor.py`: `process_failure` and `process_iteration_2` now call `build_repo_memory(repo_id)` instead of the old `_fetch_similar_fixes()` (deleted — fully superseded).
+- `diagnosis_agent.py`: `diagnose_failure()` takes a `repo_memory: RepoMemory | None` param; `_build_user_prompt()` renders `repo_memory.as_prompt_context()` (category outcomes, repeated error signatures, dependency patterns, flaky tests, known-good files, recent verified fixes) when present. The old `similar_fixes` list param is kept only as a legacy fallback for the three callers that don't build repo memory yet (`deploy_repair.py`, `push_handler.py`, `routes/runs.py` force-fix) — it never fires when `repo_memory` is passed.
+- Verification: 52 backend tests pass (25 skipped, live-API-key gated), all agent modules import cleanly, no circular imports.
+
+Not yet done as part of M2: `deploy_repair.py`, `push_handler.py`, and the `routes/runs.py` force-fix path still diagnose without repo memory context — they predate the RAG path entirely, so this isn't a regression, just an opportunity for a later pass.
+
 Next milestones:
-- M2: inject repo memory into first-pass and retry diagnosis prompts.
 - M3: calibrate confidence using historical repo/category outcomes.
 - M4: harden dependency chain completeness for peer and type packages.
 - M5: broader tests and final roadmap/deploy verification.

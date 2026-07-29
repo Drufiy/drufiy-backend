@@ -17,6 +17,7 @@ from app.agent.log_fetcher import (
 )
 from app.agent.flaky_tracker import get_flaky_summary, is_known_flaky, record_flaky, record_flaky_failure_only
 from app.agent.pr_creator import PRCreationError, create_fix_pr, push_fix_to_branch
+from app.agent.repo_memory import build_repo_memory
 from app.agent.workflow_diff import assess_diff_risk
 from app.config import settings
 from app.db import supabase
@@ -101,8 +102,7 @@ async def process_failure(ci_run_id: str):
             workflow_name=workflow_name,
         )
 
-        # RAG: fetch past verified fixes for this repo as few-shot context
-        similar_fixes = _fetch_similar_fixes(repo["id"])
+        repo_memory = build_repo_memory(repo["id"])
 
         # ── 5. Diagnose (120s wall-clock cap) ────────────────────────────────
         try:
@@ -118,7 +118,7 @@ async def process_failure(ci_run_id: str):
                     commit_sha=commit_sha,
                     commit_diff=commit_diff or None,
                     current_files=current_files or None,
-                    similar_fixes=similar_fixes or None,
+                    repo_memory=repo_memory if not repo_memory.is_empty() else None,
                     investigation_context={
                         "repo_full_name": repo_full_name,
                         "access_token": access_token,
@@ -272,8 +272,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                 workflow_name=workflow_name,
             )
 
-        # RAG: inject past verified fixes — especially useful on retry iterations
-        similar_fixes_iter2 = _fetch_similar_fixes(repo["id"])
+        repo_memory_iter2 = build_repo_memory(repo["id"])
 
         # L2: repeated-hypothesis detection — same error signature as the previous iteration
         # means the previous fix didn't address the real cause. See ROADMAP.md lesson L2.
@@ -302,7 +301,7 @@ async def process_iteration_2(ci_run_id: str, new_logs: str, previous_diagnosis:
                     commit_sha=commit_sha,
                     commit_diff=commit_diff or None,
                     current_files=current_files_iter2 or None,
-                    similar_fixes=similar_fixes_iter2 or None,
+                    repo_memory=repo_memory_iter2 if not repo_memory_iter2.is_empty() else None,
                     repeated_failure=repeated_failure,
                     investigation_context={
                         "repo_full_name": repo_full_name,
@@ -877,44 +876,6 @@ def _mark_rerun_resolved(ci_run_id: str, diagnosis_id: str | None):
 async def _sleep(seconds: int):
     import asyncio
     await asyncio.sleep(seconds)
-
-
-def _fetch_similar_fixes(repo_id: str, limit: int = 3) -> list[dict]:
-    """
-    Return recent verified fixes as RAG context.
-    Prefers same-repo fixes, falls back to cross-repo matches.
-    """
-    try:
-        pool_resp = (
-            supabase.table("diagnoses")
-            .select("problem_summary, root_cause, fix_description, category, confidence, files_changed, run_id")
-            .eq("verification_status", "verified")
-            .neq("fix_type", "manual_required")
-            .order("created_at", desc=True)
-            .limit(50)
-            .execute()
-        )
-        pool = pool_resp.data or []
-        if not pool:
-            return []
-
-        runs_resp = (
-            supabase.table("ci_runs")
-            .select("id")
-            .eq("repo_id", repo_id)
-            .execute()
-        )
-        repo_run_ids = {r["id"] for r in (runs_resp.data or [])}
-
-        same_repo = [d for d in pool if d.get("run_id") in repo_run_ids]
-        fixes = (same_repo or pool)[:limit]
-        for f in fixes:
-            f.pop("run_id", None)
-        logger.info(f"RAG: fetched {len(fixes)} fixes (same_repo={len(same_repo)}) for repo_id={repo_id}")
-        return fixes
-    except Exception as e:
-        logger.warning(f"RAG fetch failed for repo_id={repo_id}: {e}")
-        return []
 
 
 
