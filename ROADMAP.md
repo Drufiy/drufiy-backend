@@ -380,10 +380,10 @@ Expanding into Kafka, Kubernetes, Docker, Terraform, Redis, PostgreSQL, load bal
 **The right path:** Push CI reliability to 60%+ first, then extend downstream one step at a time — CI → Deploy → Runtime → Production. Each step is the natural adjacent domain, reuses the diagnosis engine, and closes the "user left with another problem" gap.
 
 **Sequencing:**
-1. **P0: Fix L1 + L2** — masked exception diagnosis, repeated-hypothesis detection. Biggest single lever for success rate.
-2. **P1: Deploy-aware repair** — detect Vercel/Netlify/Cloud Run deploy failures after CI passes. Closes the "CI verified but deploy failed" user frustration. Builds on existing `external_checks.py`.
-3. **P2: Per-repo memory flywheel** — remember past fixes per repo, stop starting from scratch each run.
-4. **P3: Production/runtime awareness** — read-only crash loop detection, deploy-correlated error diagnosis. This is the entry point to Docker/k8s/Cloud Run logs — not a separate expansion, but the natural next step after deploy repair.
+1. **P0: Fix L1 + L2** — masked exception diagnosis, repeated-hypothesis detection. Biggest single lever for success rate. **DONE** (2026-07-10 session).
+2. **P1: Deploy-aware repair** — detect Vercel/Netlify/Cloud Run deploy failures after CI passes. Closes the "CI verified but deploy failed" user frustration. Builds on existing `external_checks.py`. **DONE** (2026-07-11 session).
+3. **P2: Per-repo memory flywheel** — remember past fixes per repo, stop starting from scratch each run. **DONE** (M1-M5, 2026-07-18 → 2026-07-30 session — see "Per-Repo Memory Flywheel" below).
+4. **P3: Production/runtime awareness** — read-only crash loop detection, deploy-correlated error diagnosis. This is the entry point to Docker/k8s/Cloud Run logs — not a separate expansion, but the natural next step after deploy repair. **Next up, not started.**
 
 ---
 
@@ -537,8 +537,18 @@ What changed:
 - Scope: JS/TS `package.json` only for now — Python peer-pin patterns (e.g. type-stub packages) are a documented follow-up, not built speculatively.
 - Verification: 6 new unit tests in `tests/test_dependency_chain_completeness.py` (partial-bump mismatch flagged, complete bump left alone, no-package.json no-op, malformed JSON doesn't crash, unpaired package ignored, major-version extraction edge cases). Full suite: 64 passed, 25 skipped (live-API-gated), no regressions.
 
-Next milestones:
-- M5: broader tests and final roadmap/deploy verification.
+**Milestone M5 shipped (2026-07-30) — flywheel epic closed.** Broader tests plus deploy verification, closing out the 5-milestone plan (M1-M5) started 2026-07-18.
+
+What changed:
+- New `tests/test_diagnosis_pipeline_integration.py`: exercises M1 + M3 + M4 together through the real `diagnose_failure()` entry point (not just their individual unit tests in isolation) — confirms repo memory reaches the prompt, a poor effective track record (accounting for reverted fixes) caps confidence, and a partial peer-version bump is independently caught by the dependency-chain guardrail, all in one diagnosis. A second test confirms the three call sites that don't build repo memory yet (`deploy_repair.py`, `push_handler.py`, force-fix) are unaffected — `repo_memory=None` is a true no-op for M3/M4.
+- Deploy verification (not just "git push succeeded"): checked Cloud Build directly rather than trusting the push.
+  - M2 (`2a6b663`) → build `ea504f12` — SUCCESS
+  - M3 (`2f631d4`) → build `4188de52` — SUCCESS
+  - M4 (`1514560`) → build `5a5bbb9d` — SUCCESS
+  - `GET /health` → `200`, 100% traffic on `drufiy-backend-00171-dmj` (latest revision) — the service is actually serving the new code, not just built.
+- Full suite: 66 passed, 25 skipped (live-API-gated), 0 regressions across all five milestones.
+
+**Flywheel status: DONE.** Per-repo memory is built from real Supabase history (M1), injected into every first-pass and retry diagnosis prompt (M2), used to cap overconfident fix_type decisions against actual outcome data including reverted fixes (M3), and the specific dependency-chain gap that caused the lagom-humanizer incident is closed with both a prompt rule and a deterministic guardrail (M4). Not yet extended to `deploy_repair.py` / `push_handler.py` / force-fix — those three entry points still diagnose without repo memory context, unchanged from before this epic; extending them is a scoped follow-up, not a blocker.
 
 | Item | Description | From |
 |------|-------------|------|
