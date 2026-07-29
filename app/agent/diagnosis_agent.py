@@ -420,6 +420,25 @@ FIX STRATEGY:
 4. For peer dependency warnings: add the peer dep explicitly to package.json.
 5. ALWAYS provide the complete manifest file in new_content — not just the changed line.
 6. These are safe_auto_apply with high confidence when the conflict message is clear.
+7. DEPENDENCY CHAIN COMPLETENESS — when a package has known peer or type companions, bump ALL of \
+   them together in the SAME package.json edit, matching major versions:
+     react ↔ react-dom ↔ @types/react ↔ @types/react-dom
+     vue ↔ @vue/compiler-sfc ↔ @vue/runtime-core
+     @angular/core ↔ @angular/common ↔ @angular/compiler
+   Bumping react to ^18 while leaving @types/react on ^17 is an INCOMPLETE fix — it will pass a \
+   naive check but break the type build or runtime. A deterministic guardrail checks major-version \
+   alignment across these pairs and downgrades to review_recommended if you miss one, so get it \
+   right the first time: read every companion package's current version in the provided file \
+   content before writing new_content, and bump every one that's out of sync with the package \
+   you're actually fixing — not just the one named in the error message.
+
+EXAMPLE 13b — Peer dependency bump with type packages (safe_auto_apply) — CORRECT pattern
+Log: "npm ERR! peer react@'^18.0.0' from react-dom@18.2.0"
+package.json (excerpt) BEFORE: react ^17.0.2, react-dom ^18.2.0, @types/react ^17.0.39, @types/react-dom ^17.0.11
+  fix_type: "safe_auto_apply", confidence: 0.93, category: "dependency"
+  files_changed: [{path: "package.json", new_content: "<complete package.json with react ^18.2.0, react-dom ^18.2.0, @types/react ^18.2.0, @types/react-dom ^18.2.0 — ALL FOUR bumped together>"}]
+  ← Bumping only "react" here and leaving @types/react on ^17 would be WRONG — the type packages
+    would then disagree with the runtime packages about the React major version.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEPLOY / DOCKER FAILURES
@@ -880,7 +899,8 @@ async def diagnose_failure(
     if updates:
         diagnosis = diagnosis.model_copy(update=updates)
 
-    return _apply_deterministic_guardrails(diagnosis, preprocessed)
+    diagnosis = _apply_deterministic_guardrails(diagnosis, preprocessed)
+    return _check_dependency_chain_completeness(diagnosis)
 
 
 _BARE_MODULE_RE = re.compile(
@@ -992,6 +1012,85 @@ def _recalibrate_confidence(
         f"-> capped at {calibrated_ceiling}"
     )
     return diagnosis.model_copy(update={"confidence": calibrated_ceiling})
+
+
+# M4: known peer/type package pairs whose major versions must stay in lockstep.
+# A JS/TS build breaks just as hard from a partial bump (react ^18, @types/react ^17
+# left behind) as from no bump at all — this is the exact gap that caused the
+# lagom-humanizer dependency incident. See ROADMAP.md "Dependency chain completeness".
+_PEER_VERSION_PAIRS = [
+    ("react", "react-dom"),
+    ("react", "@types/react"),
+    ("react-dom", "@types/react-dom"),
+    ("vue", "@vue/compiler-sfc"),
+    ("vue", "@vue/runtime-core"),
+    ("@angular/core", "@angular/common"),
+    ("@angular/core", "@angular/compiler"),
+]
+
+
+def _extract_major_version(spec: str) -> int | None:
+    """Best-effort leading major version from a semver range like '^18.2.0' or '~5.0.1'."""
+    if not isinstance(spec, str):
+        return None
+    spec = spec.strip()
+    if not spec or spec in ("*", "latest", "next") or spec.startswith(("workspace:", "file:", "git", "link:")):
+        return None
+    match = re.search(r"(\d+)", spec)
+    return int(match.group(1)) if match else None
+
+
+def _check_dependency_chain_completeness(diagnosis: Diagnosis) -> Diagnosis:
+    """
+    M4: deterministic check for peer/type package major-version alignment in a
+    rewritten package.json. Prompt instructions alone weren't reliable enough —
+    this catches an incomplete bump instead of letting it ship as safe_auto_apply.
+    """
+    package_json = next(
+        (fc for fc in diagnosis.files_changed if fc.path.endswith("package.json") and fc.new_content),
+        None,
+    )
+    if not package_json:
+        return diagnosis
+
+    try:
+        manifest = json.loads(package_json.new_content)
+    except (json.JSONDecodeError, TypeError):
+        return diagnosis
+
+    if not isinstance(manifest, dict):
+        return diagnosis
+
+    versions: dict[str, str] = {}
+    for section in ("dependencies", "devDependencies", "peerDependencies"):
+        section_data = manifest.get(section)
+        if isinstance(section_data, dict):
+            versions.update(section_data)
+
+    mismatches = []
+    for pkg_a, pkg_b in _PEER_VERSION_PAIRS:
+        if pkg_a not in versions or pkg_b not in versions:
+            continue
+        major_a = _extract_major_version(versions[pkg_a])
+        major_b = _extract_major_version(versions[pkg_b])
+        if major_a is not None and major_b is not None and major_a != major_b:
+            mismatches.append(f"{pkg_a}@{versions[pkg_a]} vs {pkg_b}@{versions[pkg_b]}")
+
+    if not mismatches:
+        return diagnosis
+
+    logger.warning(f"Dependency chain incomplete — peer major-version mismatch: {mismatches}")
+    return diagnosis.model_copy(update={
+        "fix_type": "review_recommended",
+        "speculative": True,
+        "fix_description": (
+            f"{diagnosis.fix_description}\n\n"
+            "Guardrail: package.json bumps one package in a peer/type group without matching "
+            f"the others — major-version mismatch: {'; '.join(mismatches)}. Held for review "
+            "instead of auto-applied; a partial peer bump breaks the build the same way a "
+            "missing bump does."
+        ),
+    })
 
 
 def _extract_missing_modules(logs: str) -> list[str]:

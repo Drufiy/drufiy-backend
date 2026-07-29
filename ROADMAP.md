@@ -528,8 +528,16 @@ What changed:
 - The capped confidence then flows through the existing static downgrade gates (`<0.6` → `review_recommended`, `<0.4` → `manual_required` for certain categories) unchanged, so a poor track record gets the same downstream treatment as genuinely low model confidence — no new fix_type logic duplicated.
 - Verification: 6 new unit tests in `tests/test_confidence_calibration.py` (cap applied, minimum-sample gate, reverted-fixes-count-against-rate, good-track-record no-op, no-repo-memory no-op, different-category no-op). Full suite: 58 passed, 25 skipped (live-API-gated), no regressions.
 
+**Milestone M4 shipped (2026-07-29):** Dependency chain completeness for peer/type packages — closes the exact gap that caused the lagom-humanizer dependency incident (bumping one package in a peer group while leaving its companions on an old major).
+
+What changed:
+- `diagnosis_agent.py` prompt: new rule 7 in DEPENDENCY CONFLICT RESOLUTION spelling out known peer/type companion groups (`react ↔ react-dom ↔ @types/react ↔ @types/react-dom`, `vue ↔ @vue/compiler-sfc ↔ @vue/runtime-core`, `@angular/core ↔ @angular/common ↔ @angular/compiler`) that must be bumped together, plus a worked example (EXAMPLE 13b) showing the correct four-package bump and calling out the wrong partial version.
+- New deterministic guardrail `_check_dependency_chain_completeness(diagnosis)`: parses the rewritten `package.json`'s `dependencies`/`devDependencies`/`peerDependencies`, checks the same known pairs for major-version alignment via `_extract_major_version()`, and downgrades `safe_auto_apply` → `review_recommended` (+ `speculative=True`, explanatory note) on any mismatch — same pattern as the existing missing-module guardrail. This is the actual enforcement; the prompt rule reduces how often it needs to fire, but isn't trusted alone.
+- Wired into `diagnose_failure()`'s return chain after `_apply_deterministic_guardrails`.
+- Scope: JS/TS `package.json` only for now — Python peer-pin patterns (e.g. type-stub packages) are a documented follow-up, not built speculatively.
+- Verification: 6 new unit tests in `tests/test_dependency_chain_completeness.py` (partial-bump mismatch flagged, complete bump left alone, no-package.json no-op, malformed JSON doesn't crash, unpaired package ignored, major-version extraction edge cases). Full suite: 64 passed, 25 skipped (live-API-gated), no regressions.
+
 Next milestones:
-- M4: harden dependency chain completeness for peer and type packages.
 - M5: broader tests and final roadmap/deploy verification.
 
 | Item | Description | From |
