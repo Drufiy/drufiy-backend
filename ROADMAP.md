@@ -561,8 +561,10 @@ What changed:
 | G1 — Pre-emptive fix on push | Detect failures before CI runs via static analysis | IMPROVEMENTS.md |
 | G3 — Slack/Discord bot | Interactive fix buttons in Slack/Discord | IMPROVEMENTS.md |
 | Multi-CI provider support | Add adapters for CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines. ~1-1.5 days per provider. Core pipeline is CI-agnostic — each adapter needs: webhook route, log fetcher, connect/setup flow. Keep GitHub Actions as default | New |
-| Confidence recalibration | Outcome data now exists — recalibrate against actual merge/revert rates | Ready |
-| Dependency chain fix completeness | When bumping a dep, also bump all `@types/*` peers and transitive requirements. Add few-shot example: react→react-dom→@types/react→@types/react-dom full chain. Tested gap: lagom-humanizer test. | P2 |
+| ~~Confidence recalibration~~ | **DONE** — see M3, Per-Repo Memory Flywheel section | Shipped |
+| ~~Dependency chain fix completeness~~ | **DONE** — see M4, Per-Repo Memory Flywheel section | Shipped |
+| Diagnosis quality: root-cause fixes over strictness suppression | Found live 2026-07-30 (rpcs3-compatibility demo): a `review_recommended` fix correctly got held for review, but the fix itself lowered PHPStan level 9→5 rather than resolving the 2 underlying `mixed`-to-`string` type errors — silences the checker instead of fixing the bug. Legitimate move for legacy code and Prash correctly didn't auto-merge it, but the diagnosis should distinguish "resolved the root cause" from "loosened the gate that was catching it" and prefer the former when feasible, flagging clearly when it falls back to the latter. | New — GTM demo finding |
+| Remove Kimi as fallback model | Aradhya's call, 2026-07-30 — reasoning not yet captured, revisit before acting | Pending — needs discussion |
 | RAG upgrade — embeddings | Replace keyword RAG with semantic search over past fixes | New |
 | Learning flywheel — few-shot | Retrieve similar past failures as few-shot context in prompts | New |
 | Multi-provider CI | Support CircleCI, GitLab CI, Jenkins, Bitbucket Pipelines — one adapter per provider (webhook + log fetcher), diagnosis pipeline stays unchanged | New |
