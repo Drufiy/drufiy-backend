@@ -662,6 +662,50 @@ never hit this — it's purely an artifact of using forks as demo fixtures. No a
 
 ---
 
+### FIX: tool-call arguments trusted without shape validation (found live, 2026-07-30)
+
+**Severity: real reliability bug, caught during GTM demo — not a demo-only artifact.**
+
+While running a live demo (forked `AniLeo/rpcs3-compatibility`, triggered CI, watched Prash
+process it), a run sat in "Diagnosing" for 8+ minutes then failed with:
+
+```
+Schema validation failed: 6 validation errors for Diagnosis
+problem_summary Field required [input_value={'path': 'functions.php', ... 'line': 240, 'limit': 20}]
+```
+
+**Root cause:** `_call_deepseek()` / `_call_kimi_structured()` / `_call_openai_compatible_fallback()`
+in `kimi_client.py` all trusted `json.loads(tool_calls[0].function.arguments)` succeeding as proof
+the arguments were shaped like the requested tool. They weren't checking that. DeepSeek's diagnosis
+calls use `tool_choice="auto"` (thinking mode rejects forced tool_choice) — under that, a model can
+emit a tool call under the one offered function name whose *arguments* are shaped like a completely
+different tool from earlier in the investigation history (here: `fetch_file`'s `{path, line, limit}`
+instead of `submit_diagnosis`'s fields). The API guarantees the function *name*, not the argument
+*shape*. `json.loads()` succeeding said nothing about that — the malformed dict got returned as a
+"valid" result and crashed deep in `diagnose_failure()`'s `Diagnosis(**raw_args)` construction,
+8 minutes and a full DeepSeek budget after the run started, with no useful error trail until the
+reconciler's stuck-run sweep even surfaced it.
+
+**Fix:** new `_args_match_schema(args, tool_schema)` in `kimi_client.py` — checks every key in the
+tool schema's `required` list is actually present. Wired into all three model-call functions right
+after JSON parsing succeeds; on mismatch, the call is treated exactly like a failed call (returns
+`None`), which drops straight into the *already-existing* DeepSeek→Kimi fallback chain in
+`call_with_investigation()` instead of propagating garbage downstream. No new control flow needed —
+this was a pure trust gap, not a missing fallback path.
+
+**Worth calling out:** this almost certainly wasn't demo-specific. Nothing about forking a repo makes
+DeepSeek more likely to confuse tool shapes — this can happen on any real customer run using the
+investigation loop (masked-exception / repeated-failure paths that call `fetch_file` before
+submitting a diagnosis). It just happened to surface during a demo because that's when someone was
+watching the dashboard in real time instead of it silently landing in `diagnosis_failed`.
+
+**Verification:** 6 new unit tests in `tests/test_tool_call_schema_validation.py`, including a direct
+repro of the production failure (`test_call_deepseek_rejects_wrong_shaped_tool_call`) and confirmation
+that correctly-shaped calls still pass through unaffected. Full suite: 72 passed, 25 skipped
+(live-API-gated), no regressions.
+
+---
+
 ## KEY NUMBERS TO TRACK
 
 | Metric | Baseline (2026-06-14) | Target |

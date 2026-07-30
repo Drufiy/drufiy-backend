@@ -83,6 +83,21 @@ def _extract_json_from_prose(text: str) -> dict | None:
     return None
 
 
+def _args_match_schema(args: dict, tool_schema: dict) -> bool:
+    """
+    A successfully-parsed tool call is not proof the arguments are shaped like the
+    tool that was supposedly called — a model under tool_choice="auto" (DeepSeek's
+    thinking mode rejects forced tool_choice) can emit valid JSON for a DIFFERENT
+    tool's shape under the right function name, e.g. returning a fetch_file-shaped
+    {path, line, limit} dict when only submit_diagnosis was offered. json.loads()
+    succeeding says nothing about that. Check the required keys actually showed up.
+    """
+    if not isinstance(args, dict):
+        return False
+    required = tool_schema.get("parameters", {}).get("required", [])
+    return all(key in args for key in required)
+
+
 def _usage_from_response(response, latency_ms: int) -> dict:
     return {
         "input_tokens": response.usage.prompt_tokens if response.usage else None,
@@ -231,16 +246,22 @@ async def _call_kimi_structured(messages: list, tool_schema: dict):
 
     # ── Path 1: proper tool call ──────────────────────────────────────────────
     if msg.tool_calls:
+        raw = msg.tool_calls[0].function.arguments
         try:
-            args = json.loads(msg.tool_calls[0].function.arguments)
-            return args, msg.tool_calls[0].function.arguments, usage
+            args = json.loads(raw)
         except json.JSONDecodeError:
-            raw = msg.tool_calls[0].function.arguments
             # Try to salvage malformed JSON
             extracted = _extract_json_from_prose(raw)
             if extracted:
                 return extracted, raw, usage
             return None, raw, usage
+        if _args_match_schema(args, tool_schema):
+            return args, raw, usage
+        logger.warning(
+            f"Kimi tool call parsed but doesn't match {tool_schema.get('name')} schema "
+            f"(missing required keys) — treating as invalid: keys={list(args.keys())}"
+        )
+        return None, raw, usage
 
     # ── Path 2: model returned prose — try to extract JSON from it ───────────
     prose = msg.content or ""
@@ -340,15 +361,28 @@ async def _call_deepseek(model: str, messages: list, tool_schema: dict, timeout:
         logger.info(f"DeepSeek ({model}): reasoning={len(reasoning_content)} chars, tool_calls={len(msg.tool_calls or [])}")
 
         if msg.tool_calls:
+            raw = msg.tool_calls[0].function.arguments
             try:
-                args = json.loads(msg.tool_calls[0].function.arguments)
-                return args, msg.tool_calls[0].function.arguments, usage
+                args = json.loads(raw)
             except json.JSONDecodeError:
-                raw = msg.tool_calls[0].function.arguments
                 extracted = _extract_json_from_prose(raw)
                 if extracted:
                     return extracted, raw, usage
                 return None, raw, usage
+            if _args_match_schema(args, tool_schema):
+                return args, raw, usage
+            # A successful tool call with the right function name is not proof the
+            # arguments are shaped right — DeepSeek under tool_choice="auto" (thinking
+            # mode rejects forced tool_choice) can emit a different tool's argument
+            # shape under the one offered function name, e.g. a fetch_file-shaped
+            # {path, line, limit} dict where submit_diagnosis was expected. Treat that
+            # as a failed call so the retry/fallback chain handles it instead of a
+            # Pydantic crash deep in diagnose_failure().
+            logger.warning(
+                f"DeepSeek ({model}) tool call parsed but doesn't match {tool_schema.get('name')} "
+                f"schema (missing required keys) — treating as invalid: keys={list(args.keys())}"
+            )
+            return None, raw, usage
 
         # No tool call — model returned prose; try to recover JSON from it.
         prose = msg.content or ""
@@ -401,15 +435,21 @@ async def _call_openai_compatible_fallback(
     msg = response.choices[0].message
 
     if msg.tool_calls:
+        raw = msg.tool_calls[0].function.arguments
         try:
-            args = json.loads(msg.tool_calls[0].function.arguments)
-            return args, msg.tool_calls[0].function.arguments, usage
+            args = json.loads(raw)
         except json.JSONDecodeError:
-            raw = msg.tool_calls[0].function.arguments
             extracted = _extract_json_from_prose(raw)
             if extracted:
                 return extracted, raw, usage
             return None, raw, usage
+        if _args_match_schema(args, tool_schema):
+            return args, raw, usage
+        logger.warning(
+            f"{label} tool call parsed but doesn't match {tool_schema.get('name')} schema "
+            f"(missing required keys) — treating as invalid: keys={list(args.keys())}"
+        )
+        return None, raw, usage
 
     prose = msg.content or ""
     extracted = _extract_json_from_prose(prose)
