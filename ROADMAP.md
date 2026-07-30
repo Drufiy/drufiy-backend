@@ -644,6 +644,24 @@ agent_calls logging:
 
 ---
 
+### Note: GitHub's fork-Actions gate — not a Prash bug (2026-07-30)
+
+While running GTM demos (forking public repos with broken CI, connecting them to Prash, and
+triggering a re-run to generate a live fix PR to show the maintainer), we hit a wall: pushing to
+a freshly-forked repo produced zero workflow runs — no check-runs, no statuses, nothing — despite
+`actions/permissions` reporting `enabled: true` and the workflow showing as `active`.
+
+**Root cause:** GitHub requires a one-time manual click in the Actions tab ("I understand my
+workflows, go ahead and enable them") before a *forked* repo's workflows will actually execute.
+This is a separate gate from the `enabled` flag and has no public REST API — UI-only.
+
+**Confirmed this is not a Prash gap worth building:** searched `routes/repos.py`'s connect flow,
+full git history, and the frontend for any Actions-permissions handling — none exists, and none
+is needed. The gate only applies to *forks*. Real users connect their own existing repos, which
+never hit this — it's purely an artifact of using forks as demo fixtures. No action item here.
+
+---
+
 ## KEY NUMBERS TO TRACK
 
 | Metric | Baseline (2026-06-14) | Target |
