@@ -88,14 +88,17 @@ def test_single_huge_job_failure_at_bottom_survives():
     assert FAIL_MARKER in result
 
 
-def test_multi_job_failing_job_sorts_early_is_lost():
-    """RED — reproduces AgentCore: the failing job's log is small, but it
-    sorts alphabetically BEFORE a large passing job, so the tail-keep window
-    lands entirely inside the passing job and the failing job is excluded
-    outright, not just partially cut."""
+def test_multi_job_failing_job_sorts_early_is_lost_without_failure_info():
+    """RED forever, by design — not part of the "must go green" set. This is
+    the accepted degraded-mode fallback: if _fetch_failing_job_names() can't
+    determine which job failed (network error, permissions), _parse_zip_logs
+    has no signal to reorder on and falls back to plain alphabetical sort —
+    reproducing AgentCore exactly as it happened live before the fix. The
+    real fix is proven by the "_survives_with_failure_info" test below, which
+    is what fetch_workflow_logs actually exercises in production."""
     zip_bytes = _make_zip({
-        "0_Backend (lint + test)/1_run.txt": FAIL_MARKER,
-        "1_Mobile (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] mobile step ok\n"),
+        "Backend (lint + test)/1_run.txt": FAIL_MARKER,
+        "Mobile (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] mobile step ok\n"),
     })
 
     result = _parse_zip_logs(zip_bytes)
@@ -105,12 +108,29 @@ def test_multi_job_failing_job_sorts_early_is_lost():
     )
 
 
+def test_multi_job_failing_job_sorts_early_survives_with_failure_info():
+    """GREEN once M2 lands — same shape as the test above, but this time the
+    caller supplies which job actually failed (exactly what fetch_workflow_logs
+    now does via _fetch_failing_job_names). The failing job's files should be
+    reordered to survive truncation regardless of alphabetical position."""
+    zip_bytes = _make_zip({
+        "Backend (lint + test)/1_run.txt": FAIL_MARKER,
+        "Mobile (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] mobile step ok\n"),
+    })
+
+    result = _parse_zip_logs(zip_bytes, failing_job_names={"Backend (lint + test)"})
+
+    assert FAIL_MARKER in result, (
+        "Failing job's log was still excluded even though the caller identified it as failing"
+    )
+
+
 def test_multi_job_failing_job_sorts_late_survives():
     """CONTROL — the failing job sorts last, so today's tail-keep happens to
     include it by accident. Must keep passing after the fix."""
     zip_bytes = _make_zip({
-        "0_Admin (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] admin step ok\n"),
-        "1_Frontend (lint + test)/1_run.txt": FAIL_MARKER,
+        "Admin (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] admin step ok\n"),
+        "Frontend (lint + test)/1_run.txt": FAIL_MARKER,
     })
 
     result = _parse_zip_logs(zip_bytes)

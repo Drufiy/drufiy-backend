@@ -67,6 +67,32 @@ def _logs_have_step_output(zip_bytes: bytes) -> bool:
     return False
 
 
+async def _fetch_failing_job_names(github_run_id: int, repo_full_name: str, access_token: str) -> set[str] | None:
+    """
+    Best-effort lookup of which jobs in this run actually failed, via the
+    check-runs-adjacent jobs API. Returns None (not an empty set) on any
+    failure so callers can tell "couldn't determine" apart from "nothing
+    failed" and fall back to the old behavior rather than misbehave.
+    """
+    url = f"https://api.github.com/repos/{repo_full_name}/actions/runs/{github_run_id}/jobs"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(url, headers=headers, params={"per_page": 100})
+        if response.status_code != 200:
+            logger.warning(f"Could not fetch job list for run {github_run_id}: status {response.status_code}")
+            return None
+        jobs = response.json().get("jobs", [])
+        return {j["name"] for j in jobs if j.get("conclusion") == "failure"}
+    except Exception as e:
+        logger.warning(f"Could not fetch job list for run {github_run_id}: {e}")
+        return None
+
+
 async def fetch_workflow_logs(github_run_id: int, repo_full_name: str, access_token: str) -> str:
     url = f"https://api.github.com/repos/{repo_full_name}/actions/runs/{github_run_id}/logs"
     headers = {
@@ -103,10 +129,27 @@ async def fetch_workflow_logs(github_run_id: int, repo_full_name: str, access_to
                 )
                 await asyncio.sleep(LOG_RETRY_DELAY_SECONDS)
 
-    return _parse_zip_logs(zip_bytes)
+    failing_job_names = await _fetch_failing_job_names(github_run_id, repo_full_name, access_token)
+    return _parse_zip_logs(zip_bytes, failing_job_names=failing_job_names)
 
 
-def _parse_zip_logs(zip_bytes: bytes) -> str:
+_TOP_LEVEL_JOB_RE = re.compile(r"^\d+_(.+)\.txt$")
+
+
+def _job_name_for_file(path: str) -> str | None:
+    """Extract a job's display name from either log-ZIP naming convention:
+    a nested per-step file ('Backend (lint + test)/1_run.txt') or a flat
+    per-job summary ('0_Backend (lint + test).txt')."""
+    m = _MATRIX_JOB_RE.match(path)
+    if m:
+        return m.group(1).strip()
+    m = _TOP_LEVEL_JOB_RE.match(path)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _parse_zip_logs(zip_bytes: bytes, failing_job_names: set[str] | None = None) -> str:
     if len(zip_bytes) > MAX_LOG_ZIP_BYTES:
         raise LogsParseError("Log ZIP is too large to process safely")
 
@@ -115,7 +158,17 @@ def _parse_zip_logs(zip_bytes: bytes) -> str:
     except zipfile.BadZipFile as e:
         raise LogsParseError(f"Response was not a valid ZIP: {e}")
 
-    txt_files = sorted(n for n in zf.namelist() if n.endswith(".txt"))
+    # M2: failure-aware ordering. Truncation below keeps the LAST MAX_LOG_CHARS
+    # of the concatenated blob, so failing jobs' files must sort last —
+    # otherwise a large passing job can push a small failing job's entire log
+    # out of the kept window, regardless of which job actually broke the build.
+    # See ROADMAP.md "P1 BUG: Failure-blind log truncation".
+    def _sort_key(fname: str) -> tuple:
+        job_name = _job_name_for_file(fname)
+        is_failing = bool(failing_job_names) and job_name in failing_job_names
+        return (is_failing, fname)
+
+    txt_files = sorted((n for n in zf.namelist() if n.endswith(".txt")), key=_sort_key)
     if not txt_files:
         raise LogsParseError("ZIP contained no .txt log files")
 
