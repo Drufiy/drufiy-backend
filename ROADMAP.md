@@ -619,6 +619,24 @@ Deliberately NOT touched during the 2026-07-30 GTM demo session — this is the 
 
 ---
 
+## RELIABILITY EPIC: M1-M9 (started 2026-07-31)
+
+Second multi-milestone push, same shape as the Per-Repo Memory Flywheel (M1-M5, 2026-07-18 → 2026-07-30): commit and push after each milestone, full test suite before every push, deploy verification at the end.
+
+**Scope decision:** clears the P1 log-truncation bug plus every P2 backlog item (quick, no-blocker reliability/success-rate wins). P3 items (Slack alerts, RAG/embeddings, few-shot, pre-emptive fix, bot) explicitly deferred to a future batch — not rushed in alongside this. Three backlog items explicitly excluded from this epic because they're blocked on something only Aradhya can provide: removing Kimi as fallback (reasoning not given), DeepSeek V4 Flash migration (needs a new API key), and the unresolved workflow-file PR-creation inconsistency (needs direct DB access to trace, different shape of task than a build).
+
+- **M1** — Log-truncation test fixtures + red tests (4 log shapes, prove the current bug before fixing it)
+- **M2** — Failure-aware job log selection (`log_fetcher.py`, use check-runs data)
+- **M3** — Reorder preprocessing before truncation, remove the redundant second tail-cut
+- **M4** — Per-job character budget
+- **M5** — Validate against PMSS's and AgentCore's real captured logs, close out the P1 bug
+- **M6** — Diagnosis quality: prefer root-cause fixes over strictness suppression (found on rpcs3-compatibility)
+- **M7** — D1 (iterations 3→4) + D2 (parallel DeepSeek/Kimi calls) bundled — small, same area
+- **M8** — B3: multi-model consensus on low-confidence/unknown diagnoses
+- **M9** — B4: speculative PRs instead of dead-end `manual_required` for code failures
+
+---
+
 ## PRODUCTION CONFIG (current)
 
 ```
