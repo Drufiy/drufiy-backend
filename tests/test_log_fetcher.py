@@ -63,6 +63,7 @@ async def test_fetch_real_logs():
 FAIL_MARKER = "FAIL_MARKER_UNIQUE: the actual failure lives here"
 
 
+@pytest.mark.xfail(strict=True, reason="M2-M4 fix not yet implemented; tail-only truncation discards head failures")
 def test_single_huge_job_failure_at_top_is_lost():
     """RED — reproduces PMSS: one job's own log exceeds 80K chars, the real
     failure sits near the start (line 284 of 4510 in the live case), and
@@ -88,6 +89,7 @@ def test_single_huge_job_failure_at_bottom_survives():
     assert FAIL_MARKER in result
 
 
+@pytest.mark.xfail(strict=True, reason="M2-M4 fix not yet implemented; tail-window lands inside passing job, excluding failing job")
 def test_multi_job_failing_job_sorts_early_is_lost():
     """RED — reproduces AgentCore: the failing job's log is small, but it
     sorts alphabetically BEFORE a large passing job, so the tail-keep window
