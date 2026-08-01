@@ -1,8 +1,23 @@
+import io
 import os
+import zipfile
 
 import pytest
 
-from app.agent.log_fetcher import LogsNotAvailableError, fetch_workflow_logs
+from app.agent.log_fetcher import LogsNotAvailableError, _parse_zip_logs, fetch_workflow_logs
+
+
+def _make_zip(files: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, content in files.items():
+            zf.writestr(name, content)
+    return buf.getvalue()
+
+
+def _padding(chars: int, line: str = "2026-07-30T00:00:00Z [PASS] noise line filling space\n") -> str:
+    reps = chars // len(line) + 1
+    return (line * reps)[:chars]
 
 
 @pytest.mark.asyncio
@@ -36,3 +51,68 @@ async def test_fetch_real_logs():
     )
     assert len(logs) > 0
     assert len(logs) <= 80_100
+
+
+# M1: log-truncation bug fixtures — see ROADMAP.md "P1 BUG: Failure-blind log
+# truncation". _parse_zip_logs() keeps only the LAST 80K chars of the whole
+# concatenated blob. The two RED tests below reproduce the live PMSS and
+# AgentCore failures: the real failure line gets discarded because it isn't
+# in the tail. The two CONTROL tests confirm the cases that already work
+# today keep working once M2-M4 land.
+
+FAIL_MARKER = "FAIL_MARKER_UNIQUE: the actual failure lives here"
+
+
+def test_single_huge_job_failure_at_top_is_lost():
+    """RED — reproduces PMSS: one job's own log exceeds 80K chars, the real
+    failure sits near the start (line 284 of 4510 in the live case), and
+    thousands of trailing PASS lines push it out of the kept tail window."""
+    content = FAIL_MARKER + "\n" + _padding(120_000)
+    zip_bytes = _make_zip({"0_build.txt": content})
+
+    result = _parse_zip_logs(zip_bytes)
+
+    assert FAIL_MARKER in result, (
+        "Failure at the start of a large single-job log was discarded by tail-only truncation"
+    )
+
+
+def test_single_huge_job_failure_at_bottom_survives():
+    """CONTROL — the case tail-truncation already handles correctly. Must
+    keep passing after the M2-M4 fix; proves the fix doesn't regress this."""
+    content = _padding(120_000) + FAIL_MARKER
+    zip_bytes = _make_zip({"0_build.txt": content})
+
+    result = _parse_zip_logs(zip_bytes)
+
+    assert FAIL_MARKER in result
+
+
+def test_multi_job_failing_job_sorts_early_is_lost():
+    """RED — reproduces AgentCore: the failing job's log is small, but it
+    sorts alphabetically BEFORE a large passing job, so the tail-keep window
+    lands entirely inside the passing job and the failing job is excluded
+    outright, not just partially cut."""
+    zip_bytes = _make_zip({
+        "0_Backend (lint + test)/1_run.txt": FAIL_MARKER,
+        "1_Mobile (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] mobile step ok\n"),
+    })
+
+    result = _parse_zip_logs(zip_bytes)
+
+    assert FAIL_MARKER in result, (
+        "Failing job's log was entirely excluded because a passing job sorted after it"
+    )
+
+
+def test_multi_job_failing_job_sorts_late_survives():
+    """CONTROL — the failing job sorts last, so today's tail-keep happens to
+    include it by accident. Must keep passing after the fix."""
+    zip_bytes = _make_zip({
+        "0_Admin (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] admin step ok\n"),
+        "1_Frontend (lint + test)/1_run.txt": FAIL_MARKER,
+    })
+
+    result = _parse_zip_logs(zip_bytes)
+
+    assert FAIL_MARKER in result
