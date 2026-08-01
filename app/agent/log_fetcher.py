@@ -74,6 +74,17 @@ _ERROR_RE = re.compile(
 
 _CONTEXT_LINES = 5  # lines of surrounding context to keep around each error line
 
+# M4: cap on each job's FILTERED (post-_filter_section_lines) contribution.
+# M2+M3 already fix the confirmed PMSS/AgentCore bugs on their own; this is
+# defense-in-depth for a narrower residual case they don't fully cover — a
+# run with several genuinely failing jobs, each producing substantial
+# legitimate error output, whose combined filtered size still exceeds
+# MAX_LOG_CHARS. Without a per-job cap, the final tail-cut would still favor
+# whichever failing job sorts last, at the expense of the others. Applied to
+# already-filtered content (error lines + context), not raw noise, so it
+# rarely triggers — 5 jobs at this budget total 75K, under MAX_LOG_CHARS.
+PER_JOB_CHAR_BUDGET = 15_000
+
 
 def _preprocess_logs(raw: str) -> str:
     """
@@ -97,6 +108,8 @@ def _preprocess_logs(raw: str) -> str:
     for i, header in enumerate(headers):
         body = splits[i + 1] if i + 1 < len(splits) else ""
         filtered = _filter_section_lines(body)
+        if len(filtered) > PER_JOB_CHAR_BUDGET:
+            filtered = "... [job output truncated] ...\n" + filtered[-PER_JOB_CHAR_BUDGET:]
         result_parts.append(f"{header}\n{filtered}")
 
     last_body = splits[-1] if splits else raw

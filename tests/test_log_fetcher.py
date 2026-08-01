@@ -4,7 +4,13 @@ import zipfile
 
 import pytest
 
-from app.agent.log_fetcher import LogsNotAvailableError, _parse_zip_logs, fetch_workflow_logs
+from app.agent.log_fetcher import (
+    MAX_LOG_CHARS,
+    PER_JOB_CHAR_BUDGET,
+    LogsNotAvailableError,
+    _parse_zip_logs,
+    fetch_workflow_logs,
+)
 
 
 def _make_zip(files: dict[str, str]) -> bytes:
@@ -140,3 +146,38 @@ def test_multi_job_failing_job_sorts_late_survives():
     result = _parse_zip_logs(zip_bytes)
 
     assert FAIL_MARKER in result
+
+
+def _dense_errors(marker: str, lines: int = 1300) -> str:
+    """Every line matches _ERROR_RE, so _filter_section_lines keeps ~all of
+    it — simulates a job with substantial *genuine* error output (~47K chars),
+    not noise _filter_section_lines would shrink away on its own."""
+    body = "\n".join(f"error: step {i} failed unexpectedly" for i in range(lines))
+    return body + f"\n{marker}"
+
+
+def test_multi_job_dense_failures_dont_crowd_out_earlier_ones():
+    """M4 — narrower residual case M2+M3 don't fully cover: 3 jobs each with
+    substantial *genuine* error content (~47K chars each, ~141K combined,
+    well over MAX_LOG_CHARS=80K). Without a per-job cap, the outer tail-cut
+    keeps only the last 80K of the combined blob, which lands entirely
+    inside Job B and C's sections — Job A's content, and specifically its
+    identifying marker, is silently dropped in full, not just trimmed.
+    Verified empirically before writing this test: removing the per-job cap
+    in _preprocess_logs reproduces exactly that (JOBA_END_MARKER missing,
+    B and C present)."""
+    zip_bytes = _make_zip({
+        "JobA.txt": _dense_errors("JOBA_END_MARKER"),
+        "JobB.txt": _dense_errors("JOBB_END_MARKER"),
+        "JobC.txt": _dense_errors("JOBC_END_MARKER"),
+    })
+    # Sanity: each job's raw content alone exceeds the per-job budget, and
+    # the combined total exceeds MAX_LOG_CHARS — the scenario this defends.
+    assert len(_dense_errors("x")) > PER_JOB_CHAR_BUDGET
+    assert 3 * len(_dense_errors("x")) > MAX_LOG_CHARS
+
+    result = _parse_zip_logs(zip_bytes)
+
+    assert "JOBA_END_MARKER" in result, "Job A's error content was dropped entirely, not just trimmed"
+    assert "JOBB_END_MARKER" in result, "Job B's error content was dropped entirely, not just trimmed"
+    assert "JOBC_END_MARKER" in result, "Job C's error content was dropped entirely, not just trimmed"
