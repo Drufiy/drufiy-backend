@@ -1,7 +1,9 @@
 # Prash — Engineering Roadmap
 
-**Updated: 2026-07-11** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
+**Updated: 2026-08-01** | Primary model: **DeepSeek V4 Pro** | Fallback: **Kimi K2.6**
 **Founders:** Aradhya Mishra + Maneesh Awasthi
+
+> ⚠️ **OPERATIONAL: auto-deploy is currently broken for the backend, action needed.** The GitHub repo was renamed `Drufiy/drufiy-backend` → `Drufiy/prash-backend` (2026-08-01, intentional, Aradhya). The Cloud Build trigger (`rmgpgab-drufiy-backend-asia-south1-Drufiy-drufiy-backend--maoeg`, id `ecb712fd-38b0-480b-b85c-a31fe998f9a8`) still has `github.name: drufiy-backend` — GitHub's webhook now reports the new name, so the trigger silently stops matching incoming push events. **No error anywhere, it just doesn't build.** Confirmed live: pushes after the rename (M5, commit `8147c79`) did not trigger a build; had to force it manually via `gcloud builds triggers run`. Two CLI fix attempts both failed (`triggers update github --repo-name=...` → `INVALID_ARGUMENT`; export/edit/`triggers import` → `FAILED_PRECONDITION`) — this needs the **GCP Console**: Cloud Build → Triggers (or Repositories/Connections) → reconnect the repo so GCP's GitHub App connection recognizes `prash-backend`, then the trigger can be pointed at the new name. Until this is fixed, **every push to `main` needs a manual `gcloud builds triggers run ecb712fd-38b0-480b-b85c-a31fe998f9a8 --region=global --branch=main`** to actually deploy. Remove this note once the Console fix lands and an ordinary push auto-deploys again.
 
 ---
 
@@ -575,6 +577,10 @@ What changed:
 
 ---
 
+## P1 BUG: Failure-blind log truncation — **RESOLVED 2026-08-01, see M1-M5 below**
+
+*(Original write-up below is kept as-is for the full incident record — mechanism, both live confirmations, why a bigger cap alone wasn't the fix. The dedicated session it called for happened; results are in the "RELIABILITY EPIC: M1-M9" section further down.)*
+
 ## P1 BUG: Failure-blind log truncation (found live 2026-07-30, fix deferred to a dedicated session)
 
 **Severity: P1 reliability. Every production diagnosis flows through this path. Confirmed twice the same day on two different repos.** This directly caps the end-to-end success rate on any repo with large or multi-job CI, which is most serious repos — exactly the "famous repos" GTM target list.
@@ -639,7 +645,7 @@ Second multi-milestone push, same shape as the Per-Repo Memory Flywheel (M1-M5, 
 
   Full suite: 78 passed, 0 failed, 25 skipped — unchanged count, confirming the fix didn't regress the synthetic fixtures either.
 
-  **Deploy verification:** [to be filled in after push — Cloud Build status, `/health`, revision check]
+  **Deploy verification:** the M5 push (`8147c79`) exposed the Cloud Build trigger issue above (see the operational alert at the top of this doc) — the automatic build never fired. Forced it manually: `gcloud builds triggers run ecb712fd-38b0-480b-b85c-a31fe998f9a8 --region=global --branch=main` → build `b3a9089b` → SUCCESS → `drufiy-backend-00185-bmc` serving 100% of traffic, `GET /health` → 200. **The full M1-M5 log-truncation fix is confirmed live in production.**
 - **M6** — Diagnosis quality: prefer root-cause fixes over strictness suppression (found on rpcs3-compatibility)
 - **M7** — D1 (iterations 3→4) + D2 (parallel DeepSeek/Kimi calls) bundled — small, same area
 - **M8** — B3: multi-model consensus on low-confidence/unknown diagnoses
