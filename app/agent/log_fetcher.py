@@ -85,6 +85,24 @@ _CONTEXT_LINES = 5  # lines of surrounding context to keep around each error lin
 # rarely triggers — 5 jobs at this budget total 75K, under MAX_LOG_CHARS.
 PER_JOB_CHAR_BUDGET = 15_000
 
+# M5 fix (found validating against real PMSS logs, not caught by synthetic
+# fixtures): _ERROR_RE is deliberately broad for recall — "warn", "fail",
+# "missing", "fatal" as loose substrings — which on real-world test output
+# matches constantly on things that aren't failures at all: test names like
+# "testProvisioningFailsLoudlyWhenConfig" (a PASSING test), a step literally
+# named "[customer-context-fatal-scan]", "rg (missing, optional)". On one
+# real PMSS job, 1393 of 4510 lines matched, so _filter_section_lines barely
+# shrank anything (530K -> 411K) — and the M4 cap's blind tail-cut on that
+# still-huge, still-noisy result cut off the 2 real [FAIL] lines sitting near
+# the top, reproducing the exact original bug at the per-job level. This
+# stricter, high-precision pattern is the fallback when the broad pass alone
+# doesn't shrink a section enough: real failure markers, not casual mentions.
+_STRICT_ERROR_RE = re.compile(
+    r"(\[FAIL\]|\bFAILED\b|\bFATAL\b|\bERROR:|\bException\b|\bTraceback\b"
+    r"|\bpanic:|exit code [^0]|npm ERR!|✗|✕|AssertionError"
+    r"|SyntaxError|TypeError|ReferenceError|ImportError|ModuleNotFoundError)"
+)
+
 
 def _preprocess_logs(raw: str) -> str:
     """
@@ -109,7 +127,15 @@ def _preprocess_logs(raw: str) -> str:
         body = splits[i + 1] if i + 1 < len(splits) else ""
         filtered = _filter_section_lines(body)
         if len(filtered) > PER_JOB_CHAR_BUDGET:
-            filtered = "... [job output truncated] ...\n" + filtered[-PER_JOB_CHAR_BUDGET:]
+            # The broad pass alone didn't shrink this section enough — real
+            # logs often have enough incidental matches (test names, casual
+            # "warning" mentions) that it barely helps. Re-filter the
+            # ORIGINAL body with the high-precision pattern instead of
+            # blindly tail-cutting the already-diluted broad result, which
+            # would just reproduce the same bug this milestone fixed.
+            filtered = _filter_section_lines(body, pattern=_STRICT_ERROR_RE)
+            if len(filtered) > PER_JOB_CHAR_BUDGET:
+                filtered = "... [job output truncated] ...\n" + filtered[-PER_JOB_CHAR_BUDGET:]
         result_parts.append(f"{header}\n{filtered}")
 
     last_body = splits[-1] if splits else raw
@@ -117,7 +143,7 @@ def _preprocess_logs(raw: str) -> str:
     return "\n\n".join(result_parts) + "\n\n=== RAW TAIL (last 40 lines) ===\n" + tail
 
 
-def _filter_section_lines(section: str) -> str:
+def _filter_section_lines(section: str, pattern: re.Pattern = _ERROR_RE) -> str:
     lines = section.splitlines()
     if not lines:
         return section
@@ -125,7 +151,7 @@ def _filter_section_lines(section: str) -> str:
     # Find indices of error lines
     error_idx: set[int] = set()
     for i, line in enumerate(lines):
-        if _ERROR_RE.search(line):
+        if pattern.search(line):
             for j in range(max(0, i - _CONTEXT_LINES), min(len(lines), i + _CONTEXT_LINES + 1)):
                 error_idx.add(j)
 
