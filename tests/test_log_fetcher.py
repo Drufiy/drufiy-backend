@@ -88,14 +88,17 @@ def test_single_huge_job_failure_at_bottom_survives():
     assert FAIL_MARKER in result
 
 
-def test_multi_job_failing_job_sorts_early_is_lost_without_failure_info():
-    """RED forever, by design — not part of the "must go green" set. This is
-    the accepted degraded-mode fallback: if _fetch_failing_job_names() can't
-    determine which job failed (network error, permissions), _parse_zip_logs
-    has no signal to reorder on and falls back to plain alphabetical sort —
-    reproducing AgentCore exactly as it happened live before the fix. The
-    real fix is proven by the "_survives_with_failure_info" test below, which
-    is what fetch_workflow_logs actually exercises in production."""
+def test_multi_job_failing_job_sorts_early_survives_even_without_failure_info():
+    """GREEN as of M3 — originally written expecting this to stay RED forever
+    (the degraded-mode fallback when _fetch_failing_job_names() can't
+    determine which job failed). It turned green as a side effect of M3:
+    _preprocess_logs() now runs on every section before truncation, and a
+    section with no error-matching lines gets shrunk to its last 20 lines
+    regardless of job order — so a huge passing job stops crowding out a
+    small failing one even without M2's job-name-based reordering. Kept as a
+    regression test for that degraded path, not because it's expected to
+    fail; M2's reordering (see the "_survives_with_failure_info" test below)
+    is still what production actually relies on when job info is available."""
     zip_bytes = _make_zip({
         "Backend (lint + test)/1_run.txt": FAIL_MARKER,
         "Mobile (typecheck)/1_run.txt": _padding(120_000, "2026-07-30T00:00:00Z [PASS] mobile step ok\n"),
@@ -104,7 +107,8 @@ def test_multi_job_failing_job_sorts_early_is_lost_without_failure_info():
     result = _parse_zip_logs(zip_bytes)
 
     assert FAIL_MARKER in result, (
-        "Failing job's log was entirely excluded because a passing job sorted after it"
+        "Failing job's log was excluded even though _preprocess_logs should have "
+        "shrunk the noisy passing job enough to prevent this"
     )
 
 

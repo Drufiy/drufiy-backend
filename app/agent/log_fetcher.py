@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import re
 import zipfile
 
 import httpx
@@ -29,9 +30,6 @@ class InsufficientPermissionsError(LogFetchError):
 class LogsParseError(LogFetchError):
     pass
 
-
-import re
-
 _MATRIX_JOB_RE = re.compile(r"^([^/]+)/")
 
 
@@ -46,6 +44,94 @@ def _extract_matrix_summary(filenames: list[str]) -> str:
         return ""
     lines = [f"- {name} ({count} steps)" for name, count in sorted(jobs.items())]
     return f"Multiple matrix jobs detected:\n" + "\n".join(lines)
+
+
+# ── Log preprocessor ──────────────────────────────────────────────────────────
+# Runs BEFORE the hard character-count truncation in _parse_zip_logs() (M3,
+# ROADMAP.md "P1 BUG: Failure-blind log truncation") — a huge verbose job log
+# (e.g. PHPUnit printing one [PASS] line per test across 2575 tests) gets
+# shrunk to its error-relevant lines here, before length-based truncation even
+# applies, so a failure buried early in a large log survives regardless of
+# position. Previously lived in diagnosis_agent.py and ran AFTER truncation,
+# which meant it could only rescue error lines that hadn't already been cut.
+
+# Patterns that indicate an error line worth keeping
+_ERROR_RE = re.compile(
+    r"(error|fail|exception|traceback|panic|fatal|critical|warn"
+    r"|cannot find|not found|does not exist|no such file"
+    r"|exit code [^0]|npm err|pip.*error|cargo.*error"
+    r"|enoent|eacces|eresolve|econnrefused|etimedout|enotfound"
+    r"|syntaxerror|typeerror|referenceerror|importerror|modulenotfounderror"
+    r"|✗|✕|FAILED|ERROR|WARN"
+    r"|unable to find|unresolved|missing|undefined|undeclared"
+    r"|permission denied|access denied|401|403|404 not found"
+    r"|invalid|unexpected token|parse error|compilation failed"
+    r"|resolutionimpossible|conflicting\s+dependencies|peer\s+dep|version\s+conflict"
+    r"|COPY failed|docker.*build.*failed|manifest.*not found"
+    r"|deploy.*failed|rollout.*failed|image.*push.*failed)",
+    re.IGNORECASE,
+)
+
+_CONTEXT_LINES = 5  # lines of surrounding context to keep around each error line
+
+
+def _preprocess_logs(raw: str) -> str:
+    """
+    Reduce verbose CI logs to error-relevant signal.
+    Keeps lines matching error patterns + context, drops noisy setup output.
+    Typically reduces 50KB → 5-10KB without losing the actual failure.
+    """
+    if not raw:
+        return raw
+
+    # Split into per-step sections on the === markers
+    section_pattern = re.compile(r"(?m)^=== .+ ===$")
+    splits = section_pattern.split(raw)
+    headers = section_pattern.findall(raw)
+
+    # If no section markers, treat entire log as one section
+    if not headers:
+        return _filter_section_lines(raw)
+
+    result_parts = []
+    for i, header in enumerate(headers):
+        body = splits[i + 1] if i + 1 < len(splits) else ""
+        filtered = _filter_section_lines(body)
+        result_parts.append(f"{header}\n{filtered}")
+
+    last_body = splits[-1] if splits else raw
+    tail = "\n".join(last_body.splitlines()[-40:])
+    return "\n\n".join(result_parts) + "\n\n=== RAW TAIL (last 40 lines) ===\n" + tail
+
+
+def _filter_section_lines(section: str) -> str:
+    lines = section.splitlines()
+    if not lines:
+        return section
+
+    # Find indices of error lines
+    error_idx: set[int] = set()
+    for i, line in enumerate(lines):
+        if _ERROR_RE.search(line):
+            for j in range(max(0, i - _CONTEXT_LINES), min(len(lines), i + _CONTEXT_LINES + 1)):
+                error_idx.add(j)
+
+    if not error_idx:
+        # No errors detected — keep last 20 lines (the conclusion of the step)
+        return "\n".join(lines[-20:]) if len(lines) > 20 else section
+
+    # Reconstruct with gap markers
+    out: list[str] = []
+    sorted_idx = sorted(error_idx)
+    prev = -1
+    for idx in sorted_idx:
+        if prev != -1 and idx > prev + 1:
+            gap = idx - prev - 1
+            out.append(f"... [{gap} line{'s' if gap > 1 else ''} omitted] ...")
+        out.append(lines[idx])
+        prev = idx
+
+    return "\n".join(out)
 
 
 def _logs_have_step_output(zip_bytes: bytes) -> bool:
@@ -188,6 +274,10 @@ def _parse_zip_logs(zip_bytes: bytes, failing_job_names: set[str] | None = None)
         return "No logs available for this run."
 
     concatenated = "".join(parts)
+
+    # M3: shrink to error-relevant signal BEFORE the hard length cut below —
+    # see the "Log preprocessor" section above for why this ordering matters.
+    concatenated = _preprocess_logs(concatenated)
 
     if len(concatenated) > MAX_LOG_CHARS:
         concatenated = "... [earlier logs truncated] ...\n" + concatenated[-MAX_LOG_CHARS:]
