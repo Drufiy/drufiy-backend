@@ -54,6 +54,45 @@ class _FakeMessage:
         self.tool_calls = tool_calls
 
 
+class _FakeChoice:
+    def __init__(self, message):
+        self.message = message
+
+
+class _FakeUsage:
+    prompt_tokens = 10
+    completion_tokens = 10
+
+
+class _FakeResponse:
+    def __init__(self, message):
+        self.choices = [_FakeChoice(message)]
+        self.usage = _FakeUsage()
+
+
+@pytest.mark.asyncio
+async def test_kimi_ignoring_forced_tool_choice_is_logged(monkeypatch, caplog):
+    """
+    Real production case (ro-sync-prash run 2a7b6ba6): Kimi ignored the forced
+    tool_choice and returned plain prose with no extractable JSON. The function
+    correctly returned None so DeepSeek's schema-mismatch fallback chain could
+    give up cleanly, but nothing was logged — a silent failure with zero
+    debuggability. There must be a WARNING log line identifying what happened.
+    """
+    async def fake_create_chat(client, **kwargs):
+        return _FakeResponse(_FakeMessage(content="I think the fix is to update the dependency.", tool_calls=None))
+
+    monkeypatch.setattr(kimi_client, "_create_chat", fake_create_chat)
+
+    with caplog.at_level("WARNING"):
+        args, raw, usage = await kimi_client._call_kimi_structured(
+            [{"role": "user", "content": "x"}], SIMPLE_TOOL,
+        )
+
+    assert args is None
+    assert any("ignored the forced tool_choice" in r.message for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_blank_model_turn_never_produces_empty_assistant_message(monkeypatch):
     """

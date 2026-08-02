@@ -254,6 +254,10 @@ async def _call_kimi_structured(messages: list, tool_schema: dict):
             extracted = _extract_json_from_prose(raw)
             if extracted:
                 return extracted, raw, usage
+            logger.warning(
+                f"Kimi tool call arguments were not valid JSON and couldn't be salvaged "
+                f"— treating as invalid. raw={raw[:300]!r}"
+            )
             return None, raw, usage
         if _args_match_schema(args, tool_schema):
             return args, raw, usage
@@ -269,6 +273,10 @@ async def _call_kimi_structured(messages: list, tool_schema: dict):
     if extracted:
         return extracted, prose, usage
 
+    logger.warning(
+        f"Kimi ignored the forced tool_choice and returned prose with no extractable "
+        f"JSON — treating as invalid. prose={prose[:300]!r}"
+    )
     return None, prose, usage
 
 
