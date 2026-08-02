@@ -151,7 +151,8 @@ async def _reconcile_one(ci_run: dict) -> int:
         previous_diagnosis = diag_result.data[0] if diag_result.data else {}
         max_iteration = previous_diagnosis.get("iteration", 1)
 
-        if max_iteration >= 2:
+        from app.agent.processor import MAX_FIX_ITERATIONS
+        if max_iteration >= MAX_FIX_ITERATIONS:
             logger.info(f"Reconciler: run {ci_run_id[:8]} fix branch failed on iter {max_iteration} → exhausted")
             supabase.table("ci_runs").update({
                 "status": "exhausted",

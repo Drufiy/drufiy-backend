@@ -28,6 +28,14 @@ from app.token_crypto import get_github_token
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
 
+# M7 (D1): max fix-branch retry iterations before giving up as "exhausted".
+# Previously hardcoded separately in webhook.py (>= 3) and reconciler.py
+# (>= 2) — same logical check duplicated with drifted thresholds, so a run
+# caught by the reconciler's sweep (webhook delivery missed/delayed) gave up
+# one iteration earlier than a run handled by the webhook directly. Single
+# shared constant now; both call sites import this instead of a literal.
+MAX_FIX_ITERATIONS = 4
+
 
 # ── Public entry points ───────────────────────────────────────────────────────
 

@@ -288,7 +288,8 @@ async def handle_verification_event(payload: dict):
             )
             previous_diagnosis = prev_diag_result.data[0] if prev_diag_result.data else {}
             max_iteration = previous_diagnosis.get("iteration", 1)
-            if max_iteration >= 3:
+            from app.agent.processor import MAX_FIX_ITERATIONS
+            if max_iteration >= MAX_FIX_ITERATIONS:
                 logger.info(f"Some workflows failed and run {ci_run_id} is already at iteration {max_iteration} → exhausted")
                 supabase.table("ci_runs").update({
                     "status": "exhausted",
