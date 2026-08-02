@@ -633,7 +633,7 @@ async def call_with_investigation(
                 messages, raw, None, usage, valid=False,
                 error="no tool call — nudging",
             )
-            messages.append({"role": "assistant", "content": (message.content if message else "") or ""})
+            messages.append({"role": "assistant", "content": (message.content if message else "") or "(no content)"})
             messages.append({"role": "user", "content":
                 "You did not call a tool. Either call an investigation tool to gather "
                 "what you still need, or call submit_diagnosis now with your best fix."})
