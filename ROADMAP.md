@@ -679,6 +679,12 @@ Re-ran the original 5-repo demo batch plus 5 freshly forked repos through the fi
 
 **Lesson learned, already corrected mid-sprint:** triggering all 6 repos' CI simultaneously caused real resource contention (the AgentCore dual-model failure and ro-sync's first timeout both happened in that window). Switched to strictly one-repo-at-a-time after Aradhya caught it live on the dashboard.
 
+**Follow-up finding (post-merge): AgentCore's PR never verified, because it genuinely didn't fix the whole problem.** AgentCore had 3 failing jobs (Backend, Frontend, Contracts); Backend alone had 3 lint errors (SIM105, F401, I001). The diagnosis fixed 2 of the 3 Backend errors and assumed I001 would "likely auto-resolve" — it didn't, since that violation is in an unrelated file (`agentcore/tools/builtin/delegate/tool.py:713`) the fix never touched. Frontend and Contracts were never attempted at all (explicitly deferred as "the backend job is the clearest code fix").
+
+Traced end-to-end from logs: PR #1's own fix-branch CI failed (correctly — the safety check working as designed), the reconciler auto-triggered a second diagnosis attempt that produced a near-duplicate PR #2 on an auto-suffixed branch, and Aradhya merged PR #1 manually around the same time — but neither PR ever had a passing CI, so master stayed red (Backend still fails on the same I001 error today; Frontend and Contracts still fail).
+
+**Product gap, not a tracking bug:** a `review_recommended` PR for a multi-error, multi-job failure doesn't clearly flag that it's a *partial* fix — the "Frontend and Contracts jobs also failed" caveat is buried in prose inside the root-cause text, not surfaced as a prominent warning on the PR itself. A maintainer skimming a 75%-confidence PR could reasonably assume merging it clears CI entirely. Worth a dedicated fix: when a diagnosis knows other jobs are still failing and out of scope, that should be a distinct, visible field/banner, not a sentence buried in root cause.
+
 ---
 
 ## PRODUCTION CONFIG (current)
