@@ -8,7 +8,13 @@ import httpx
 
 from pydantic import ValidationError
 
-from app.agent.kimi_client import DiagnosisValidationError, call_with_investigation, call_with_tool
+from app.agent.kimi_client import (
+    DiagnosisValidationError,
+    _args_match_schema,
+    _call_kimi_structured,
+    call_with_investigation,
+    call_with_tool,
+)
 from app.agent.log_fetcher import _ERROR_RE, _preprocess_logs
 from app.agent.repo_memory import RepoMemory
 from app.agent.schemas import Diagnosis
@@ -873,7 +879,8 @@ async def diagnose_failure(
 
     diagnosis = _apply_deterministic_guardrails(diagnosis, preprocessed)
     diagnosis = _check_dependency_chain_completeness(diagnosis)
-    return _flag_strictness_suppression(diagnosis)
+    diagnosis = _flag_strictness_suppression(diagnosis)
+    return await _consult_second_opinion(diagnosis, SYSTEM_PROMPT, user_prompt, run_id)
 
 
 _BARE_MODULE_RE = re.compile(
@@ -1109,6 +1116,64 @@ def _flag_strictness_suppression(diagnosis: Diagnosis) -> Diagnosis:
             f"underlying issue it caught — verify that's acceptable before merging.\n\n{diagnosis.fix_description}"
         ),
     })
+
+
+# M8: only consult a second model when the primary diagnosis is already
+# uncertain — this is a narrow, rare trigger (not a blanket "race everything"
+# like the D2 idea that got explicitly skipped for cost reasons), so the
+# added cost is proportional to how often it actually helps. Real 30-day
+# production data: 28/30 diagnoses landed at confidence >=0.92; both
+# low-confidence cases were caused by missing log signal (now fixed by
+# M1-M5), not model disagreement — but genuine disagreement is still a real
+# failure mode worth checking for going forward.
+_LOW_CONFIDENCE_THRESHOLD = 0.5
+
+
+async def _consult_second_opinion(
+    diagnosis: Diagnosis,
+    system_prompt: str,
+    user_prompt: str,
+    run_id: str | None,
+) -> Diagnosis:
+    """
+    Fire one independent Kimi call (forced tool_choice, single-shot — not the
+    full investigation loop) for low-confidence/unknown diagnoses, and record
+    whether it agrees. Deliberately does NOT use agreement to raise confidence
+    or change fix_type — compounding two uncertain guesses into apparent
+    certainty would be worse than the problem this solves. It surfaces
+    agreement/disagreement as a signal for the human reviewer, who already
+    sees this diagnosis either way since low-confidence routes to
+    review_recommended/manual_required regardless.
+    """
+    if diagnosis.category != "unknown" and diagnosis.confidence >= _LOW_CONFIDENCE_THRESHOLD:
+        return diagnosis
+
+    try:
+        second_args, _, _ = await _call_kimi_structured(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            DIAGNOSIS_TOOL,
+        )
+    except Exception as e:
+        logger.warning(f"Second-opinion Kimi call failed for run {run_id}: {e}")
+        return diagnosis
+
+    if not second_args or not _args_match_schema(second_args, DIAGNOSIS_TOOL):
+        logger.info(f"Second-opinion Kimi call for run {run_id} didn't return a valid diagnosis — skipping")
+        return diagnosis
+
+    second_fix_type = second_args.get("fix_type")
+    second_category = second_args.get("category")
+    agrees = second_fix_type == diagnosis.fix_type and second_category == diagnosis.category
+
+    logger.info(
+        f"Second opinion for run {run_id}: agrees={agrees} "
+        f"(primary={diagnosis.fix_type}/{diagnosis.category}, kimi={second_fix_type}/{second_category})"
+    )
+    note = (
+        f"\n\nCross-model check: Kimi's independent second opinion "
+        f"{'agrees with this diagnosis' if agrees else f'DISAGREES — Kimi suggested fix_type={second_fix_type}, category={second_category}'}."
+    )
+    return diagnosis.model_copy(update={"fix_description": diagnosis.fix_description + note})
 
 
 def _extract_missing_modules(logs: str) -> list[str]:
