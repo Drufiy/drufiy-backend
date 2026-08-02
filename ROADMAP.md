@@ -659,6 +659,28 @@ Second multi-milestone push, same shape as the Per-Repo Memory Flywheel (M1-M5, 
 
 ---
 
+## GTM RETRY SPRINT (2026-08-02) — validating M1-M9 against real repos, live
+
+Re-ran the original 5-repo demo batch plus 5 freshly forked repos through the fixed pipeline. Two real bugs found and fixed live during this sprint (both deployed, both tested):
+
+- **FIXED — empty assistant turn crashes DeepSeek mid-investigation.** In `kimi_client.py`'s investigation loop, when the model returned neither a tool call nor content, the "nudge" path appended `{"role": "assistant", "content": ""}` with no `tool_calls`. DeepSeek's API rejects that on the next call: `"message must not be empty"`. Crashed a real diagnosis on `fromthepage-prash` (run `a6e162bc`) outright — no manual_required, no PR, just a crash. Fix: fall back to a non-empty placeholder (`"(no content)"`) instead of `""`. Commit `db1b228`. Regression test: `test_blank_model_turn_never_produces_empty_assistant_message`.
+- **FIXED — Kimi's fallback failures were completely silent.** `_call_kimi_structured()` had two paths that returned `None` with zero logging: malformed JSON that couldn't be salvaged, and Kimi ignoring the forced `tool_choice` entirely to return plain prose. Confirmed live on `ro-sync-prash` (run `2a7b6ba6`) — "Investigation loop did not yield a final diagnosis (both models failed)" with no way to see what Kimi actually said. Both paths now log a `WARNING` with a preview of the raw content. Commit `e1bb13e`. Regression test: `test_kimi_ignoring_forced_tool_choice_is_logged`.
+
+**Open, not yet fixed — Cloud Run appears to kill in-flight background diagnoses on instance recycle.** Observed directly on `ro-sync-prash`'s second retry (run `34e69b4b`): DeepSeek actually succeeded, produced a `manual_required` diagnosis, M9's force-fix retry kicked in — then `"Drufiy backend starting"` appeared in the logs 11 minutes later (a fresh cold start) and the reconciler found the same run stuck in `'diagnosing'`, both right before *and* right after the restart. The reconciler correctly self-heals it (working as designed), but the diagnosis has now had to restart from scratch twice on this one run, wasting real DeepSeek/Kimi budget each time and adding minutes of latency. Strong suspicion: this is the same root cause as the already-documented [CPU throttling issue](project_cpu_throttling.md equivalent — background tasks get ~0 CPU once the triggering HTTP request returns) taken to its extreme — the instance scales down/recycles entirely mid-task instead of just throttling. Likely fix: `min-instances=1` or `--no-cpu-throttling` on the `drufiy-backend` Cloud Run service. Not fixed this session — needs its own investigation with Cloud Run instance/revision logs, not something to patch mid-demo.
+
+**Per-repo outcomes:**
+- **GensokyoAI** — clean: `safe_auto_apply` → downgraded to `review_recommended` (workflow file) → PR #1 → fix-branch CI passed → reconciler verified. Merged by Aradhya.
+- **mcp-guardian** — correct `manual_required` (98% confidence): missing `NPM_TOKEN` secret, correctly refused to guess. Even with a real token, this repo structurally cannot reach "verified" — `package.json` name `mcp-guardian` is already owned by the real maintainer on npm; any publish attempt from a fork gets `403 Forbidden`. Same category as the ava-supernova secret-scan case from the first sprint: this refusal *is* the correct end state, not a step toward something else.
+- **PMSS** — `manual_required` (85%) on first pass → M9 force-fix retry → speculative PR #1 (2 real PHPUnit fixes: an `is_executable()` policy violation, a PHPUnit 10 `assertNull()` static-call incompatibility).
+- **fromthepage** — hit the empty-assistant-message crash on the first attempt (fixed above); cancelled mid-retry per Aradhya's call, not pursued further this sprint.
+- **ro-sync** — hit "both models failed" twice (once isolated, ruling out pure concurrency as the cause) and the Cloud Run instance-recycle issue above on a third attempt. Deprioritized for this sprint; needs the Cloud Run fix before it's worth retrying again.
+- **AgentCore** — hit "both models failed" during the original 5-way concurrent trigger (the CPU-contention chaos test); not yet cleanly retried in isolation.
+- **RogueGPT** — skipped entirely: confirmed no genuinely broken CI (no open PRs, `main` green) — declined to manufacture a fake failure just to have a demo.
+
+**Lesson learned, already corrected mid-sprint:** triggering all 6 repos' CI simultaneously caused real resource contention (the AgentCore dual-model failure and ro-sync's first timeout both happened in that window). Switched to strictly one-repo-at-a-time after Aradhya caught it live on the dashboard.
+
+---
+
 ## PRODUCTION CONFIG (current)
 
 ```
