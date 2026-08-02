@@ -880,7 +880,44 @@ async def diagnose_failure(
     diagnosis = _apply_deterministic_guardrails(diagnosis, preprocessed)
     diagnosis = _check_dependency_chain_completeness(diagnosis)
     diagnosis = _flag_strictness_suppression(diagnosis)
-    return await _consult_second_opinion(diagnosis, SYSTEM_PROMPT, user_prompt, run_id)
+    diagnosis = await _consult_second_opinion(diagnosis, SYSTEM_PROMPT, user_prompt, run_id)
+
+    # M9 (B4): a manual_required code diagnosis is a dead end for the user —
+    # no PR, nothing to review, just a status. environment/flaky_test/unknown
+    # genuinely can't be auto-attempted (missing secrets, a human judgment
+    # call, or not enough signal), but "code" failures almost always have
+    # *some* plausible guess available. Retry once with the existing
+    # force_fix override (already used by the manual "force fix" button) to
+    # get a best-guess attempt instead, marked speculative so the PR is
+    # clearly labeled as a starting point to review, not a confident fix.
+    # Bounded to exactly one retry via the `not force_fix` guard.
+    if diagnosis.fix_type == "manual_required" and diagnosis.category == "code" and not force_fix:
+        logger.info(f"manual_required code diagnosis for run {run_id} — retrying once with force_fix")
+        retried = await diagnose_failure(
+            logs=logs,
+            repo_full_name=repo_full_name,
+            commit_message=commit_message,
+            workflow_name=workflow_name,
+            iteration=iteration,
+            previous_diagnosis=previous_diagnosis,
+            run_id=run_id,
+            commit_sha=commit_sha,
+            commit_diff=commit_diff,
+            current_files=current_files,
+            force_fix=True,
+            repeated_failure=repeated_failure,
+            model=model,
+            similar_fixes=similar_fixes,
+            repo_memory=repo_memory,
+            investigation_context=investigation_context,
+        )
+        if retried.fix_type != "manual_required":
+            return retried.model_copy(update={"speculative": True})
+        # Even forced, the model still couldn't produce anything — genuinely
+        # nothing to guess at. Keep the original diagnosis, not the retry.
+        return diagnosis
+
+    return diagnosis
 
 
 _BARE_MODULE_RE = re.compile(
