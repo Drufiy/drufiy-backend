@@ -442,6 +442,50 @@ package.json (excerpt) BEFORE: react ^17.0.2, react-dom ^18.2.0, @types/react ^1
     would then disagree with the runtime packages about the React major version.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ROOT CAUSE VS SUPPRESSION — when a linter, type checker, or static analyzer fails
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+When PHPStan, ESLint, mypy, tsc, or a similar analysis tool fails, there are always
+two ways to make the check pass: fix the code the tool is correctly flagging, or
+loosen the tool so it stops flagging it. These are NOT equivalent fixes.
+
+FIX STRATEGY — in this order:
+1. Read what the tool is ACTUALLY complaining about (the specific type error, the
+   specific rule violation) and fix that in the source: add the missing type
+   annotation, add the null check, cast the value, add the missing return path.
+   This is the real fix — prefer it whenever the change is small and scoped.
+2. Only fall back to loosening the tool itself (lowering a PHPStan `level`,
+   dropping a tsconfig `strict` flag, disabling an ESLint rule, adding
+   `# type: ignore` / `@ts-ignore` / `// eslint-disable`) when the real fix would
+   require touching code far outside the scope of this failure, or you genuinely
+   cannot determine the correct fix from the available context.
+3. If you DO fall back to loosening the check, you MUST say so explicitly and
+   honestly in fix_description — state plainly that this suppresses the check
+   rather than resolving what it caught, e.g. start the description with
+   "Note: this relaxes the analyzer rather than fixing the underlying issue —".
+   Do not describe a suppression as if it were a resolution. A confident-sounding
+   description that hides what the fix actually does is worse than an honest
+   low-confidence one.
+
+EXAMPLE 18 — PHPStan level 9 type error (real fix, PREFERRED)
+Log: "PHPStan level 9: Cannot cast mixed to string in functions.php:42"
+  fix_type: "safe_auto_apply", confidence: 0.90, category: "code"
+  files_changed: [{path: "functions.php", new_content: "<complete file with the mixed value \
+explicitly cast/validated at line 42 before use, e.g. (string) with an is_string() guard>"}]
+  fix_description: "Added an explicit string cast and type guard around the mixed value at line \
+42, satisfying PHPStan level 9 by resolving the actual type-safety gap it flagged."
+
+EXAMPLE 19 — Same failure, suppression fallback (only when the real fix is out of scope)
+  fix_type: "review_recommended", confidence: 0.75, category: "workflow_config"
+  files_changed: [{path: ".github/workflows/ci.yml", new_content: "<workflow with PHPStan level \
+lowered from 9 to 5>"}]
+  fix_description: "Note: this relaxes the analyzer rather than fixing the underlying issue — \
+lowered PHPStan from level 9 to 5 because the flagged type-safety gaps span many legacy files \
+beyond the scope of this CI failure. The 2 underlying type errors in functions.php are still \
+unresolved; only the check that was catching them was loosened."
+  ← Honest about what it actually did. WRONG would be describing this as "fixed the type errors."
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEPLOY / DOCKER FAILURES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -828,7 +872,8 @@ async def diagnose_failure(
         diagnosis = diagnosis.model_copy(update=updates)
 
     diagnosis = _apply_deterministic_guardrails(diagnosis, preprocessed)
-    return _check_dependency_chain_completeness(diagnosis)
+    diagnosis = _check_dependency_chain_completeness(diagnosis)
+    return _flag_strictness_suppression(diagnosis)
 
 
 _BARE_MODULE_RE = re.compile(
@@ -1017,6 +1062,51 @@ def _check_dependency_chain_completeness(diagnosis: Diagnosis) -> Diagnosis:
             f"the others — major-version mismatch: {'; '.join(mismatches)}. Held for review "
             "instead of auto-applied; a partial peer bump breaks the build the same way a "
             "missing bump does."
+        ),
+    })
+
+
+# M6: language patterns indicating the fix loosens an analyzer/linter/test gate
+# rather than resolving what it caught — "lowered the level", "disabled the
+# rule", "relaxed strictness". Deliberately matches the MODEL'S OWN description
+# of its fix, not file diffs (which would need the original file content this
+# guardrail doesn't have access to) — the model already states in plain
+# language what it did, so read that instead of re-deriving it from a diff.
+#
+# Flexible gap between the action verb and target noun (not a rigid adjacent
+# phrase) — verified against the real diagnosis this milestone is fixing:
+# "Lower PHPStan analysis level from 9 to 5..." has a tool name (PHPStan)
+# sitting between "Lower" and "level" that a strict "lowered the level"
+# phrase would miss entirely.
+_SUPPRESSION_LANGUAGE_RE = re.compile(
+    r"\b(lower(?:ed|ing)?|disable[ds]?|disabling|relax(?:ed|ing)?|loosen(?:ed|ing)?"
+    r"|downgrad(?:ed?|ing)|suppress(?:ed|ing)?|turn(?:ed)?\s+off|skip(?:ped|ping)?)\b"
+    r".{0,40}?\b(level|strictness|severity|check|rule|lint|test|analyzer|analysis)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_HONEST_DISCLOSURE_RE = re.compile(r"^\s*note:.{0,80}(relax|suppress|loosen|lower)", re.IGNORECASE)
+
+
+def _flag_strictness_suppression(diagnosis: Diagnosis) -> Diagnosis:
+    """
+    M6: prompt instructions ask the model to disclose when a fix loosens an
+    analyzer/linter/test gate instead of fixing what it caught (see "ROOT
+    CAUSE VS SUPPRESSION" in the system prompt) — this is the deterministic
+    backstop for when it doesn't. Found live: a PHPStan level 9->5 diagnosis
+    described itself as if it were a resolution, not a suppression.
+    """
+    text = f"{diagnosis.fix_description} {diagnosis.root_cause}"
+    if not _SUPPRESSION_LANGUAGE_RE.search(text):
+        return diagnosis
+    if _HONEST_DISCLOSURE_RE.search(diagnosis.fix_description):
+        return diagnosis  # model already disclosed it honestly, per the prompt
+
+    logger.info(f"Diagnosis loosens a check without an honest disclosure — prepending one: {text[:200]}")
+    return diagnosis.model_copy(update={
+        "fix_description": (
+            "Note: this appears to relax a linter/analyzer/test check rather than fixing the "
+            f"underlying issue it caught — verify that's acceptable before merging.\n\n{diagnosis.fix_description}"
         ),
     })
 
