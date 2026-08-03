@@ -276,15 +276,19 @@ async def github_app_register(
         logger.warning(f"GitHub App register failed for installation {body.installation_id}: {e}")
         raise HTTPException(status_code=502, detail="Failed to fetch installation repositories")
 
-    supabase.table("app_installations").upsert(
-        {
-            "user_id": current_user["id"],
-            "installation_id": body.installation_id,
-            "account_login": (repos[0].get("owner") or {}).get("login") if repos else None,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
-        on_conflict="installation_id",
-    ).execute()
+    try:
+        supabase.table("app_installations").upsert(
+            {
+                "user_id": current_user["id"],
+                "installation_id": body.installation_id,
+                "account_login": (repos[0].get("owner") or {}).get("login") if repos else None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="installation_id",
+        ).execute()
+    except Exception as e:
+        logger.error(f"Failed to record app installation {body.installation_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save installation, please try again or contact support")
 
     return {
         "installation_id": body.installation_id,
@@ -308,15 +312,19 @@ async def github_app_callback(
         logger.warning(f"GitHub App callback failed for installation {installation_id}: {e}")
         raise HTTPException(status_code=502, detail="Failed to fetch installation repositories")
 
-    supabase.table("app_installations").upsert(
-        {
-            "user_id": current_user["id"],
-            "installation_id": installation_id,
-            "account_login": (repos[0].get("owner") or {}).get("login") if repos else None,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        },
-        on_conflict="installation_id",
-    ).execute()
+    try:
+        supabase.table("app_installations").upsert(
+            {
+                "user_id": current_user["id"],
+                "installation_id": installation_id,
+                "account_login": (repos[0].get("owner") or {}).get("login") if repos else None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="installation_id",
+        ).execute()
+    except Exception as e:
+        logger.error(f"Failed to record app installation {installation_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save installation, please try again or contact support")
 
     return {
         "installation_id": installation_id,
