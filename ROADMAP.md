@@ -18,7 +18,61 @@ Prash becomes the **AI DevOps layer** — not a band-aid for CI, but the system 
 4. Fix proactively before the human even looks *(future)*
 5. Touch production with guardrails *(future — read-only first)*
 
-**Sequencing rule:** Go deep on CI repair until it's boringly perfect. That earns the right to climb. Resist breadth until the core is flawless.
+**Sequencing rule:** ~~Go deep on CI repair until it's boringly perfect. That earns the right to climb. Resist breadth until the core is flawless.~~ **REVISED 2026-08-03 — the premise was wrong, see STRATEGIC REVIEW below.** CI repair *cannot* be made "boringly perfect" inside a diff-only action space, because ~60% of real CI failures are not fixable by editing a file. The ladder was blocked at rung 2 not by execution quality but by the action space itself. New rule: **climb by widening what the agent can DO, not by perfecting what it can WRITE.**
+
+---
+
+## STRATEGIC REVIEW — 2026-08-03 (after 13 real-repo diagnosis attempts)
+
+### The number that reframes everything
+
+Across 13 diagnosis attempts on 9 real third-party repos:
+
+| Outcome | Count |
+|---|---|
+| Fully verified green | 1 (GensokyoAI) |
+| PR merged, CI still red (partial fix) | 1 (AgentCore) |
+| PR opened, unmerged | 1 (PMSS) |
+| PR merged, but suppression rather than a real fix | 1 (rpcs3-compatibility) |
+| **Correct refusal — genuinely unfixable by any code diff** | **4** |
+| Our own infrastructure bugs (since fixed) | 4 |
+| Misclassification | 1 (AgentCore, 2026-08-03) |
+
+**Only ~5 of 13 real CI failures were fixable by changing a file at all.** The rest required a secret, a permission, an org-level decision, or knowledge of a value the tooling deliberately redacts. Prash can only emit file diffs. It was therefore *structurally* incapable of resolving ~60% of what it encountered — a gap no prompt, model, or guardrail work can close.
+
+This is not an execution failure. It is the product thesis being too narrow, discovered empirically. That finding is worth more than the 13 attempts cost.
+
+### Three compounding problems, in order of depth
+
+**1. Context asymmetry (deepest — strategic, not technical).** An AI agent creates value where the *machine has more context than the human*. CI repair is precisely backwards: when CI breaks, the best-equipped person is whoever just pushed the commit — they know what they changed and why. Prash arrives with strictly *less* context than the developer already has. Aradhya's instinct that he "doesn't see the CI/CD pain among devs" is correct and structural. Domains with the asymmetry pointing the *right* way: production incident response (on-call didn't write the service, 3am, high stakes), failing dependency-upgrade PRs (nobody wants the work, machine has equal context), unfamiliar-codebase onboarding.
+
+**2. The atomic-fix model breaks on real repos (architectural).** Prash is built for "one root cause → one diagnosis → one PR." Real broken CI is usually N independent failures. AgentCore on 2026-08-03: 4 independent failures across 4 jobs (backend ruff ×8, contracts drift, frontend biome ×49, mobile parity). The system either picks one (partial fix, CI stays red, verification never fires — exactly the 2026-08-02 outcome) or gives up entirely (`manual_required` — the 2026-08-03 outcome). **"Verified" as an all-or-nothing metric is unachievable via a single atomic PR whenever N > 1.** Fixing 3 of 4 failures is real progress that currently scores as total failure.
+
+**3. The test methodology was biased against us (measurement).** Every test to date was a **fork**. Forks fail for fork-specific reasons — private submodules you can't access, npm packages you don't own, secrets living in someone else's repo settings. At least 2 of the 4 "correct refusals" (mcp-guardian's `NPM_TOKEN`, ava-supernova's submodule 404s) would simply not occur for a real user on their own repo, where they *have* the token and *have* access. **Confirmed 2026-08-03: no outside developer has ever connected their own repo. The actual use case has never been tested.**
+
+### What is actually worth keeping
+
+The asset built here is **not** "a CI fixer." It is a trustworthy autonomous agent framework with a real verification loop and genuine refusal behavior: correctly declining to fake a fix for a redacted secret, flagging PHPStan strictness suppression *as* suppression rather than claiming a fix, surfacing cross-model disagreement instead of hiding it, refusing to guess submodule URLs it cannot verify. Every competitor in this space overclaims. Nobody leads with "it will tell you when it can't." That discipline is rare, hard-won, and maps directly onto the single biggest blocker for AI in production infrastructure — **trust**. CI repair was simply the first target it was pointed at, and turned out to be a weak one.
+
+### Decision (Aradhya, 2026-08-03)
+
+**Direction: build the full AI DevOps layer.** Runway is comfortable (6+ months, no hard deadline). This was assessed as the highest-risk of the options considered (vs. narrowing to dependency-upgrade PRs, or repositioning to incident response) — chosen deliberately, with the risks below understood.
+
+**The non-negotiable condition: never go dark.** The plan considered ("build in isolation for a few months, come back with a better product") is the single highest-risk element and is explicitly rejected. Startups die from building on assumptions with no feedback loop far more often than from shipping something too narrow. 6 months of runway is the asset; spending it without users is how it gets burned.
+
+**Explicitly rejected as a differentiator: end-to-end encryption.** It is a real enterprise checkbox and it is *not* why anyone will or won't adopt this. Nobody has ever declined an AI CI tool over key-storage architecture. Adoption fails on trust in the fixes and on insufficient pain. Building encryption as a wedge is engineering-led thinking — it feels defensible and moves zero adoption. Ship it when a customer's security review demands it, not before.
+
+**The real differentiator is the permission model, not the crypto.** "It physically cannot do X without your approval" is a far stronger trust claim than "your data is encrypted." Tiered autonomy per action type and per environment, every action dry-runnable or reversible, full audit log, hard blast-radius limits (e.g. staging autonomous, production always gated). This is the product, not a feature bolted on later.
+
+### Phasing — each phase ships to real users, never more than ~4 weeks from user contact
+
+- **Phase 0 (~2 weeks) — validate the real use case + fix the atomic-fix model.** Get 3-5 outside developers onto their *own* repos. Even where CI repair proves weak, this is market research disguised as a product test: you learn what they actually complain about, which directly aims Phase 1. In parallel, fix multi-failure decomposition (fix N failures independently; treat "3 of 4 fixed" as partial success, not failure) — needed regardless of direction, and it alone converts several past `manual_required` results into real PRs.
+- **Phase 1 (~6-8 weeks) — the action layer, narrow.** Give the agent the ability to *act*, not just propose diffs: re-run a job, request a secret through a UI flow, bump a runner version, clear a cache, open N PRs instead of one. Tiered permission model from day one. **This is the highest-value single change available** — it is what converts `manual_required` into `done`, and it is the actual bridge to the DevOps layer.
+- **Phase 2 (~2-3 months) — widen the surface.** Deploys, infra state, monitoring hooks, a continuously-maintained model of system state (DevOps is *stateful*; CI repair is stateless — this is a genuine architecture shift, not an increment). Multi-step planning with verification and rollback at each step.
+
+### Immediate consequence: stop the fork-and-fix outreach
+
+It tests the wrong thing (fork-specific failures that real users won't hit), burns maintainer goodwill, and produces systematically pessimistic data. Redirect that energy into getting 5 real users onto their own repos. Remaining un-run fork candidates (ro-sync, mcp-guardian) are **dropped**, not deferred.
 
 ---
 
