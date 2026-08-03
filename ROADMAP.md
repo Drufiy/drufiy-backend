@@ -689,6 +689,18 @@ Traced end-to-end from logs: PR #1's own fix-branch CI failed (correctly — the
 
 ---
 
+## BACKLOG SWEEP (2026-08-03)
+
+**RESOLVED — Cloud Run background-task orphaning.** `gcloud run services update drufiy-backend --no-cpu-throttling` applied live (revision `drufiy-backend-00190-8pb`). Chose this over also adding `--min-instances=1` (~$65-70/month always-on cost) since it directly fixes the root cause — a throttled background task looks idle to the autoscaler and gets scaled down mid-task — without paying for a guaranteed-warm instance. Revisit `min-instances=1` if orphaning recurs.
+
+**PARTIALLY FIXED — `app_installations` table crash on real GitHub App installs.** Both `github_app_register` and `github_app_callback` in `github_oauth.py` had an unguarded `.upsert()` into a table that doesn't exist live (the `CREATE TABLE` was written in `supabase_patch_github_app.sql` but never applied). Code now catches the failure and returns a clear 500 instead of an opaque crash (commit `a7c30d3`) — but the actual fix (creating the table) needs the SQL run in Supabase's own SQL editor; not something to do with a service-role key without Aradhya's direct supervision on a schema change. Deployed, table creation still pending as of this writing.
+
+**Investigated, not resolved — the July 30 workflow-file PR-creation mystery.** Traced every code path that calls `create_fix_pr()`: `_apply_fix()` in `processor.py` (has the workflow-file gate, downgrades and returns before ever calling `create_fix_pr`), `_auto_skip_test()` (flaky-test skip PRs, never touches workflow files by construction), and `handle_push_event()` in `push_handler.py` (a genuinely separate path — see below). None of them explain a PR appearing ~60-70s *after* a "downgrading to review_recommended" log line for the same run. Also checked `reconciler.py`: no function queries for `ci_runs.status == "diagnosed"` to pick a run back up, so that's not it either. Static code reading is exhausted here — this still needs direct DB access to the `ci_runs`/`diagnoses`/`agent_calls` history for the specific runs (rpcs3-compatibility's original PR, GensokyoAI's PR #1) to see what actually fired between the downgrade and the PR appearing. Not guessing at an explanation.
+
+**FIXED — real, separate bug found during that investigation: push-preflight PR creation had no workflow-file safety gate.** `handle_push_event()` (the pre-emptive syntax-error-on-push path) calls `create_fix_pr()` directly and unconditionally for any non-`manual_required` diagnosis with file changes — it never had `_apply_fix()`'s "workflow files have privileged secrets access, never auto-apply" check. In practice low-exploitability today (this path only fires on pushed `.py` syntax errors, unlikely to produce a diagnosis touching `.github/workflows/*`), but a real, unguarded gap in what's supposed to be a hard safety boundary. Same gate now applied here too. Commit `169d077`, 2 new tests (`test_push_handler_workflow_gate.py`): the gated case, and a control confirming non-workflow fixes are unaffected. Full suite: 103 passed, 25 skipped.
+
+---
+
 ## PRODUCTION CONFIG (current)
 
 ```
