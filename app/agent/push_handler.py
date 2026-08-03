@@ -80,6 +80,19 @@ async def handle_push_event(payload: dict):
         }).eq("id", ci_run_id).execute()
         return
 
+    # Security: workflow files have privileged access to secrets — never auto-apply.
+    # Same gate as _apply_fix() in processor.py; this path calls create_fix_pr()
+    # directly and previously had no equivalent check.
+    wf_paths = [fc.path for fc in diagnosis.files_changed if fc.path.startswith(".github/workflows/")]
+    if wf_paths:
+        logger.warning(f"Workflow file change in push-preflight run {ci_run_id} ({wf_paths}) — skipping auto-PR")
+        supabase.table("ci_runs").update({
+            "status": "diagnosed",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", ci_run_id).execute()
+        supabase.table("diagnoses").update({"fix_type": "review_recommended"}).eq("id", diagnosis_row["id"]).execute()
+        return
+
     pr_result = await create_fix_pr(
         repo_full_name=repo_full_name,
         access_token=access_token,
