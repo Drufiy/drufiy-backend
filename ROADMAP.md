@@ -701,6 +701,27 @@ Traced end-to-end from logs: PR #1's own fix-branch CI failed (correctly — the
 
 ---
 
+## ⚠️ OPEN — possible DeepSeek V4 Flash regression on the prod agentic path (2026-08-03)
+
+**Observation (n=1, not yet confirmed).** First production diagnosis after the Flash switch, on `Aradhya648/AgentCore` (run `0a49653c`, fork synced to upstream `69a757a`): returned `fix_type=manual_required`, `category=unknown`, **confidence 0.40**. The actual failure was 8 ruff lint errors with exact file:line locations and ruff printing the fix verbatim (`SIM103` "Return the condition directly" → `approvals.py:245`, `E501` line-too-long → `closing_posture.py:172`, `SIM108` "Use ternary `serial = 4 if sub == "commit" else 2`" → `git_ops.py:76`, `I001` unsorted imports → `tests/test_verify.py:515`, plus 4 more). That is about as unambiguously `code`-category and mechanically fixable as CI failures get.
+
+**Kimi's second opinion (M8) got it right and was overruled by design:** logged `agrees=False (primary=manual_required/unknown, kimi=review_recommended/code)`. M8 deliberately only annotates disagreement rather than overriding `fix_type` — correct as designed (compounding two uncertain guesses into false certainty is worse), but here the primary was simply wrong and the cross-check knew it.
+
+**Direct A/B against Pro on the same repo, one day apart, same prod agentic path:**
+
+| | Model | Failure | Result |
+|---|---|---|---|
+| 2026-08-02 | `deepseek-v4-pro` | ruff `SIM105` + 2 more | `review_recommended`, **75%**, `code`, **PR opened** ✓ |
+| 2026-08-03 | `deepseek-v4-flash` | ruff × 8, clearer + larger | `manual_required`, **40%**, `unknown`, **no PR** ✗ |
+
+**Why the eval missed this — a real methodology gap, not bad luck.** `evals/run_eval.py` defaults to the **single-shot** path (`call_with_tool`, files supplied in-prompt). Production runs the **agentic investigation loop**. The harness's own README says so explicitly: *"Single-shot ≠ prod path. Prod runs the agentic loop. Use `--live` periodically to catch loop-specific regressions the default mode won't see."* The Flash-vs-Pro comparison that justified the switch (93.3% valid_diagnosis on both, `fix_type_acc` 85.7% vs 78.6%) was run **without `--live`** — so it never exercised the code path where this failure occurred. The switch was justified on data that structurally could not have caught this class of regression.
+
+**Status: no action taken yet — Aradhya's call, deliberately paused.** Flash remains live in production (`DEEPSEEK_MODEL=deepseek-v4-flash`, revision `drufiy-backend-00195-gds`). Options when picking this up: (a) controlled A/B — re-run this exact commit pinned to `deepseek-v4-pro`, same logs and same loop, to confirm or clear Flash; (b) roll back to Pro immediately and investigate after; (c) re-run the eval harness with `--live` (needs `GH_TOKEN` with repo read) to get a comparison that actually covers the prod path. **(c) is the durable fix to the measurement gap regardless of which model wins.**
+
+**Related backlog (logged, deliberately not fixed mid-sprint): M9's speculative-retry gate is disabled by a misclassification.** `diagnosis_agent.py:894` gates the retry on `fix_type == "manual_required" AND category == "code"`. When the model misclassifies a code failure as `unknown` — exactly what happened above — the safety net that exists precisely for dead-end `manual_required` results never fires. One wrong field silently disables the fallback, and the disagreement signal that would have caught it (`agrees=False`, `kimi=code`) is already computed and logged one line earlier but unused for this decision. Candidate fix: let M9 fire when the primary says `manual_required`/`unknown` *and* the second opinion says `code`. Not changing diagnosis behavior mid-sprint.
+
+---
+
 ## PRODUCTION CONFIG (current)
 
 ```
