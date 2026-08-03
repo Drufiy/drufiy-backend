@@ -17,11 +17,11 @@ class Settings(BaseSettings):
     # DeepSeek (primary)
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com/v1"
-    deepseek_model: str = "deepseek-v4-pro"
+    deepseek_model: str = "deepseek-v4-flash"
     kimi_input_price_per_1m_tokens: float | None = 0.60
     kimi_output_price_per_1m_tokens: float | None = 2.50
-    deepseek_input_price_per_1m_tokens: float | None = 0.435
-    deepseek_output_price_per_1m_tokens: float | None = 0.87
+    deepseek_input_price_per_1m_tokens: float | None = 0.14
+    deepseek_output_price_per_1m_tokens: float | None = 0.28
 
     # Generic fallback model (OpenAI-compatible — provider-agnostic)
     fallback_enabled: bool = False
