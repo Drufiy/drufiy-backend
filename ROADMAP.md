@@ -294,7 +294,7 @@ IRIS-backend failed diagnosis 4 times with "Diagnosis timed out after 120 second
 
 **Also found (separate fix):** `verification_workflows` column was missing from the `ci_runs` schema → `PGRST204` mid-iteration. Added via migration + schema reload.
 
-**Infra note:** Cloud Run **CPU throttling is ON** (default). FastAPI background tasks get near-zero CPU after the webhook responds, slowing DeepSeek's streaming. The 240s budget absorbs this. Switching to "CPU always allocated" would speed diagnosis but is a billing change — deferred.
+**Infra note:** ~~Cloud Run CPU throttling is ON (default). FastAPI background tasks get near-zero CPU after the webhook responds, slowing DeepSeek's streaming.~~ **RESOLVED 2026-08-03** — see below.
 
 #### KEY QA FINDING — Prash diagnosed the WRONG root cause when the real exception was masked
 
@@ -666,7 +666,9 @@ Re-ran the original 5-repo demo batch plus 5 freshly forked repos through the fi
 - **FIXED — empty assistant turn crashes DeepSeek mid-investigation.** In `kimi_client.py`'s investigation loop, when the model returned neither a tool call nor content, the "nudge" path appended `{"role": "assistant", "content": ""}` with no `tool_calls`. DeepSeek's API rejects that on the next call: `"message must not be empty"`. Crashed a real diagnosis on `fromthepage-prash` (run `a6e162bc`) outright — no manual_required, no PR, just a crash. Fix: fall back to a non-empty placeholder (`"(no content)"`) instead of `""`. Commit `db1b228`. Regression test: `test_blank_model_turn_never_produces_empty_assistant_message`.
 - **FIXED — Kimi's fallback failures were completely silent.** `_call_kimi_structured()` had two paths that returned `None` with zero logging: malformed JSON that couldn't be salvaged, and Kimi ignoring the forced `tool_choice` entirely to return plain prose. Confirmed live on `ro-sync-prash` (run `2a7b6ba6`) — "Investigation loop did not yield a final diagnosis (both models failed)" with no way to see what Kimi actually said. Both paths now log a `WARNING` with a preview of the raw content. Commit `e1bb13e`. Regression test: `test_kimi_ignoring_forced_tool_choice_is_logged`.
 
-**Open, not yet fixed — Cloud Run appears to kill in-flight background diagnoses on instance recycle.** Observed directly on `ro-sync-prash`'s second retry (run `34e69b4b`): DeepSeek actually succeeded, produced a `manual_required` diagnosis, M9's force-fix retry kicked in — then `"Drufiy backend starting"` appeared in the logs 11 minutes later (a fresh cold start) and the reconciler found the same run stuck in `'diagnosing'`, both right before *and* right after the restart. The reconciler correctly self-heals it (working as designed), but the diagnosis has now had to restart from scratch twice on this one run, wasting real DeepSeek/Kimi budget each time and adding minutes of latency. Strong suspicion: this is the same root cause as the already-documented [CPU throttling issue](project_cpu_throttling.md equivalent — background tasks get ~0 CPU once the triggering HTTP request returns) taken to its extreme — the instance scales down/recycles entirely mid-task instead of just throttling. Likely fix: `min-instances=1` or `--no-cpu-throttling` on the `drufiy-backend` Cloud Run service. Not fixed this session — needs its own investigation with Cloud Run instance/revision logs, not something to patch mid-demo.
+**RESOLVED 2026-08-03 — Cloud Run was killing in-flight background diagnoses on instance recycle.** Observed directly on `ro-sync-prash`'s second retry (run `34e69b4b`): DeepSeek actually succeeded, produced a `manual_required` diagnosis, M9's force-fix retry kicked in — then `"Drufiy backend starting"` appeared in the logs 11 minutes later (a fresh cold start) and the reconciler found the same run stuck in `'diagnosing'`, both right before *and* right after the restart. The reconciler correctly self-healed it (working as designed), but the diagnosis had to restart from scratch twice on that one run, wasting real DeepSeek/Kimi budget and minutes of latency each time. Confirmed root cause: CPU throttling (default Cloud Run behavior) meant a background task continuing after the triggering HTTP response returns gets ~0 CPU, makes ~no real progress, looks idle to the autoscaler, and gets scaled down mid-task.
+
+**Fix:** `gcloud run services update drufiy-backend --no-cpu-throttling` — CPU now stays allocated for the instance's full lifetime, not just during active requests. Chose this over also adding `--min-instances=1` (which would fully eliminate scale-to-zero) because it directly fixes the root cause — throttled-looking-idle — without a ~$65-70/month always-on charge for an instance that's idle most of the time. Revisit `--min-instances=1` if orphaning recurs even with throttling off. Verified live: revision `drufiy-backend-00190-8pb`, `run.googleapis.com/cpu-throttling: 'false'` confirmed, `/health` returns 200.
 
 **Per-repo outcomes:**
 - **GensokyoAI** — clean: `safe_auto_apply` → downgraded to `review_recommended` (workflow file) → PR #1 → fix-branch CI passed → reconciler verified. Merged by Aradhya.
@@ -702,7 +704,7 @@ KIMI_BASE_URL=https://api.moonshot.ai/v1
 KIMI_MODEL=kimi-k2.6
 ```
 
-**Cloud Run:** `drufiy-backend-00155-kbc` (asia-south1) — CPU throttling ON (default); background tasks throttled post-response
+**Cloud Run:** `drufiy-backend-00190-8pb` (asia-south1) — CPU always allocated (`--no-cpu-throttling`, set 2026-08-03); background tasks no longer starved post-response
 **Frontend:** `prash.drufiy.com`
 
 ---
