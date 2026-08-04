@@ -76,6 +76,72 @@ It tests the wrong thing (fork-specific failures that real users won't hit), bur
 
 ---
 
+## BUILD PLAN — Prash v2 as a local agent (decided 2026-08-03)
+
+### The shape change, and why it matters more than it sounds
+
+Aradhya's chosen direction: **Prash becomes a CLI agent in the shape of Claude Code** — you point it at your infrastructure, it reads one local `.env` holding everything it needs, it asks permission for risky actions, and it has selectable permission modes (including a bypass mode for automation). Desktop app later. Core goal: *end-to-end completion with minimal human interference*.
+
+This is not an extension of today's product. Today's Prash is a **hosted service**: GitHub pokes a webhook → Cloud Run diagnoses → PR appears → user checks a dashboard. What's proposed is a **local tool** that runs on the user's own machine with the user's own credentials.
+
+**The strategic consequence is large and mostly unnoticed: it dissolves the trust problem.** The blocker identified in the strategic review was "nobody grants an autonomous agent production access." In a local-CLI model, *we never hold their credentials at all* — the keys stay in their `.env`, on their machine, and never touch our servers. That is strictly stronger than the end-to-end encryption idea that was rejected earlier, and it costs nothing to build because it's an absence of infrastructure rather than a presence. Claude Code's own adoption is the proof this model sells.
+
+### What ports over, verified by inspection (not assumed)
+
+Coupling audit run 2026-08-03 — count of direct database/web-stack dependencies per module:
+
+| Module | Couplings | Verdict |
+|---|---|---|
+| `diagnosis_agent.py` (~1,200 lines: prompts, guardrails, confidence calibration, honest-refusal logic) | **0** | **Ports as-is.** Pure function: logs + context in, `Diagnosis` out. |
+| `log_fetcher.py` (parsing, error filtering, per-job budgets) | **0** | **Ports as-is.** |
+| `schemas.py`, `repo_memory.py` | 0 | Port as-is. |
+| `kimi_client.py` | 3 | Ports after making `_log_agent_call` optional. Trivial. |
+| `processor.py` | 22 | **Does not port** — this is hosted-flow orchestration. The CLI gets its own orchestrator. |
+| `webhook.py`, `reconciler.py`, `routes/*` | high | Stay with the hosted service. Not rebuilt, not ported. |
+
+**Conclusion: the valuable IP is already portable.** Every prompt, guardrail, confidence rule, and refusal behaviour lives in modules with zero coupling to the web stack. Only the plumbing is bound to the hosted flow, and plumbing is the cheap part to rewrite. This is a far better starting position than a rewrite.
+
+Also directly reusable regardless of shape: `vercel_client.py` (the template for every new provider connector — authenticate, locate resource, fetch logs, poll state), `deploy_repair.py` (existing proof the loop already works on non-CI failures), `notifier.py`, and the `evals/` harness.
+
+### The unresolved tension, and the proposed answer
+
+The stated vision is *"Prash should know what is going on in production"*. A CLI you invoke by hand **cannot notice a 3am incident** — Claude Code doesn't watch anything; you summon it. These two goals genuinely conflict.
+
+**Proposed resolution: one binary, two modes.** `prash fix` runs interactively, exactly like Claude Code. `prash watch` runs as a background process — on the user's own machine or their own server — polling what it's been given access to and acting inside its permission grants. Same code, same permission engine, same credentials-never-leave-your-control property. The hosted service is *kept as-is* to watch GitHub (it already does this well), not rebuilt.
+
+### Capability scope — the inclusion rule
+
+"Later on it solves everything" is how products die. The rule for whether an action ships:
+
+> An action qualifies when it is **(1) frequently needed**, **(2) verifiable** — we can prove afterwards whether it worked, and **(3) reversible or harmless**. Anything failing (3) sits behind mandatory approval regardless of the permission mode the user selected — including bypass mode.
+
+**v1 capability set:**
+
+- *Investigate (read):* GitHub Actions logs, Vercel builds, Cloud Run logs, Kubernetes pod status/logs/events
+- *Act — safe tier (auto-allowed in permissive modes):* re-run a failed job, restart a service or pod, open a fix PR, request a missing secret from the user
+- *Act — approval tier (always prompts, even in bypass):* roll back a deployment, scale resources, apply a config change
+- *Never:* database migrations, anything destroying data, anything touching production without an explicit per-action grant
+
+### Permission modes (mirroring Claude Code's model, which the user explicitly referenced)
+
+`read-only` → `ask every time` (default) → `auto-safe` (safe tier proceeds, approval tier prompts) → `environment-scoped` (auto on staging, prompt on production) → `bypass` (for CI/automation; still refuses the "never" list).
+
+### Two-week plan — four parallel tracks, matched to 2 people + 4 Claude Code accounts
+
+Track A defines the action interface on days 1–2; B, C and D build against it afterwards, so collision risk stays low.
+
+**Track A — CLI spine and permission engine.** `prash` entry point; loads local `.env`; the permission mode system; the `Action` abstraction (every action declares: what it does, its risk tier, whether it's reversible, how to dry-run it, how to verify it worked); an append-only audit log of every action taken. *Done when:* the existing "open a PR" action runs through the new system end to end with a permission prompt, and nothing else changed.
+
+**Track B — Read connectors.** Kubernetes (pod status, logs, events), Cloud Run logs, AWS. Built on the `vercel_client.py` pattern. Natural fit for Maneesh given the Docker/k8s research. *Done when:* `prash investigate` can pull real diagnostic data from a live cluster and a live Cloud Run service.
+
+**Track C — Write actions.** Re-run job, restart pod, request secret, roll back deploy, scale. Each ships with a dry-run and a verification step. *Done when:* each action can be executed, and afterwards proves whether it actually worked.
+
+**Track D — Decouple the brain, and fix multi-failure.** Lift `diagnosis_agent` + `log_fetcher` + `schemas` into a package callable without Supabase; make `kimi_client`'s call logging optional. Then fix the long-standing atomic-fix bug: split N independent failures, attempt each separately, and report "fixed 3 of 4" as a *partial success* rather than a total failure. *Done when:* the AgentCore case from 2026-08-03 (4 independent failures) produces 3 fixes instead of one `manual_required`.
+
+**Running alongside all four:** get outside developers onto their own projects. Still zero to date; every data point held is from forks.
+
+---
+
 ## STATUS TRACKER — AUDIT FIXES (A-series)
 
 *From the original MODEL_AUDIT_AND_FIX_PLAN.md. Crossed-off items are verified in code.*
