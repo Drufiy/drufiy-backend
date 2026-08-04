@@ -134,11 +134,23 @@ Track A defines the action interface on days 1–2; B, C and D build against it 
 
 **Track B — Read connectors.** Kubernetes (pod status, logs, events), Cloud Run logs, AWS. Built on the `vercel_client.py` pattern. Natural fit for Maneesh given the Docker/k8s research. *Done when:* `prash investigate` can pull real diagnostic data from a live cluster and a live Cloud Run service.
 
-**Track C — Write actions.** Re-run job, restart pod, request secret, roll back deploy, scale. Each ships with a dry-run and a verification step. *Done when:* each action can be executed, and afterwards proves whether it actually worked.
+**Track C — Write actions.** All three target actions ship in this fortnight (Aradhya's call: "each one"). They are **not** simultaneous — dependencies force the order:
+
+1. **Request a missing secret, then finish the job.** *No dependencies* — starts the moment Track A's action interface exists (~day 3). Closes the single most common dead end observed in testing (`needs_secret`), and is the cleanest proof that Prash now completes work rather than advising.
+2. **Restart a stuck service or pod.** *Blocked on Track B* — cannot be built before the Kubernetes/Cloud Run connectors can reach a live system.
+3. **Roll back a bad release.** *Blocked on release tracking* — needs a notion of "last known good version" before an undo means anything.
+
+Each ships with a dry-run and a verification step. *Done when:* each action executes, and afterwards proves whether it actually worked.
 
 **Track D — Decouple the brain, and fix multi-failure.** Lift `diagnosis_agent` + `log_fetcher` + `schemas` into a package callable without Supabase; make `kimi_client`'s call logging optional. Then fix the long-standing atomic-fix bug: split N independent failures, attempt each separately, and report "fixed 3 of 4" as a *partial success* rather than a total failure. *Done when:* the AgentCore case from 2026-08-03 (4 independent failures) produces 3 fixes instead of one `manual_required`.
 
 **Running alongside all four:** get outside developers onto their own projects. Still zero to date; every data point held is from forks.
+
+### Decisions taken 2026-08-03
+
+- **The hosted service stays live and untouched.** No new features, no rebuild, no retirement. It already watches GitHub competently and that work is not wasted — it becomes the "always watching" half while the CLI becomes the "does privileged things" half. Nobody spends time on it during the fortnight.
+- **All three v1 actions ship this fortnight**, in the dependency order set out in Track C. Sequencing is forced by what each one needs to exist first, not by preference.
+- **Each track needs its own written spec before an account starts on it.** Four Claude Code accounts working in parallel on a shared codebase will collide unless the interface between tracks is written down first — specifically the `Action` interface from Track A, which B, C and D all build against. Write that interface on day 1, before parallel work begins.
 
 ---
 
